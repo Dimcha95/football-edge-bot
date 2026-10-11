@@ -1,5 +1,4 @@
 import asyncio
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -8,6 +7,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 
 from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
 from database import init_db, add_user, set_user_active, get_stats, get_users_count, set_premium
@@ -120,8 +120,22 @@ async def on_startup():
     scheduler.start()
     print("Football Edge Bot запущен")
 
+async def health_check(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    await site.start()
+    print("Web server started on port 10000")
+
 async def main():
     await on_startup()
+    await start_web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
