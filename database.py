@@ -1,4 +1,5 @@
-   import os
+
+import os
 import asyncpg
 from datetime import datetime, timedelta
 
@@ -179,7 +180,8 @@ async def get_user_status(user_id: int):
         )
         if not row:
             return None, None
-        is_premium, joined_at = row["is_premium"], row["joined_at"]
+        is_premium = row["is_premium"]
+        joined_at = row["joined_at"]
         if is_premium:
             return "premium", None
         joined = datetime.fromisoformat(joined_at)
