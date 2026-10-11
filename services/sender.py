@@ -1,23 +1,9 @@
-
-
-
 from aiogram import Bot
-from database import get_active_users, save_signal
+from database import get_users_for_signals, save_signal, is_signal_sent
 from services.odds import get_soccer_odds, parse_matches
 from services.model import estimate_totals, check_value
+from datetime import datetime
 import aiosqlite
-
-DB_PATH = "edge_bot.db"
-
-async def is_signal_sent(match_name: str, market: str) -> bool:
-    """Проверяет, отправляли ли уже такой сигнал"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT id FROM signals WHERE match_name = ? AND market = ?",
-            (match_name, market)
-        )
-        row = await cursor.fetchone()
-        return row is not None
 
 async def check_and_send(bot: Bot):
     print("Проверяю матчи...")
@@ -29,13 +15,30 @@ async def check_and_send(bot: Bot):
     matches = parse_matches(raw)
     print(f"Найдено матчей: {len(matches)}")
 
-    users = await get_active_users()
+    users = await get_users_for_signals()
     if not users:
-        print("Нет активных пользователей")
+        print("Нет пользователей для рассылки")
+        return
+
+    # Лимит 15 сигналов в день
+    today = datetime.utcnow().date().isoformat()
+    async with aiosqlite.connect("edge_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM signals WHERE date(created_at) = ?",
+            (today,)
+        )
+        sent_today = (await cursor.fetchone())[0]
+
+    if sent_today >= 15:
+        print(f"Лимит 15 сигналов в день уже достигнут ({sent_today})")
         return
 
     sent = 0
     for match in matches:
+        if sent_today + sent >= 15:
+            print("Достигнут дневной лимит 15 сигналов")
+            break
+
         totals = estimate_totals(
             match["home_strength"],
             match["away_strength"],
@@ -66,9 +69,11 @@ async def check_and_send(bot: Bot):
                 candidates.append(("ТБ 3.5", odds["over_35"], totals["over_35"], edge))
 
         for market, price, prob, edge in candidates:
+            if sent_today + sent >= 15:
+                break
+
             match_name = f"{match['home']} - {match['away']}"
 
-            # Проверяем, не отправляли ли уже
             if await is_signal_sent(match_name, market):
                 continue
 
@@ -87,8 +92,11 @@ async def check_and_send(bot: Bot):
             for uid in users:
                 try:
                     await bot.send_message(uid, text, parse_mode="HTML")
-                    sent += 1
                 except Exception:
                     pass
 
-    print(f"Отправлено сигналов: {sent}")
+            sent += 1
+
+    print(f"Отправлено сигналов: {sent} (всего сегодня: {sent_today + sent})")
+ 
+
