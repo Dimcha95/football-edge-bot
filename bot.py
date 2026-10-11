@@ -1,7 +1,4 @@
 
-
-
-
 import asyncio
 from dotenv import load_dotenv
 
@@ -14,7 +11,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
 from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
-from database import init_db, add_user, set_user_active, get_stats, get_users_count, set_premium
+from database import (
+    init_db, add_user, set_user_active, get_stats, get_users_count, 
+    set_premium, get_today_signals_count
+)
 from services.sender import check_and_send
 
 bot = Bot(token=BOT_TOKEN)
@@ -24,20 +24,16 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 async def set_commands():
-    # Команды для всех пользователей
     await bot.set_my_commands(
-        commands=[
-            BotCommand(command="start", description="Запуск бота")
-        ],
+        commands=[BotCommand(command="start", description="Запуск бота")],
         scope=BotCommandScopeDefault()
     )
-
-    # Команды только для админов
     for admin_id in ADMIN_IDS:
         await bot.set_my_commands(
             commands=[
                 BotCommand(command="start", description="Запуск бота"),
                 BotCommand(command="admin", description="Админ-панель"),
+                BotCommand(command="today", description="Сигналы за сегодня"),
                 BotCommand(command="premium", description="Выдать премиум"),
                 BotCommand(command="unpremium", description="Снять премиум")
             ],
@@ -47,19 +43,14 @@ async def set_commands():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Включить сигналы", callback_data="signals_on")],
         [InlineKeyboardButton(text="❌ Выключить", callback_data="signals_off")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
     ])
-
     await message.answer(
         "⚽️ <b>Football Edge Bot</b>\n\n"
         "Бот автоматически ищет value-ставки на футбол.\n\n"
-        "• Сканирует коэффициенты\n"
-        "• Считает вероятность\n"
-        "• Присылает только сигналы с edge\n\n"
         "Нажми кнопку, чтобы начать.",
         reply_markup=kb,
         parse_mode="HTML"
@@ -80,10 +71,7 @@ async def signals_off(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
     total, wins, loses, pending = await get_stats()
-    winrate = 0
-    if wins + loses > 0:
-        winrate = wins / (wins + loses) * 100
-
+    winrate = (wins / (wins + loses) * 100) if (wins + loses) > 0 else 0
     text = (
         "📊 <b>Статистика бота</b>\n\n"
         f"Всего сигналов: <b>{total}</b>\n"
@@ -95,24 +83,24 @@ async def show_stats(callback: types.CallbackQuery):
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
+@dp.message(Command("today"))
+async def today_stats(message: types.Message):
+    count = await get_today_signals_count()
+    await message.answer(f"📊 <b>Сигналов сегодня:</b> {count} / 15", parse_mode="HTML")
+
 @dp.message(Command("admin"))
 async def admin_cmd(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-
     total, active, premium = await get_users_count()
     total_s, wins, loses, pending = await get_stats()
-
     text = (
         "🛠 <b>Админ-панель</b>\n\n"
         f"👥 Пользователи: {total}\n"
         f"🟢 Активных: {active}\n"
         f"⭐ Premium: {premium}\n\n"
         f"📊 Сигналов: {total_s}\n"
-        f"✅ {wins} | ❌ {loses} | ⏳ {pending}\n\n"
-        "Команды:\n"
-        "/premium ID — выдать премиум\n"
-        "/unpremium ID — забрать премиум"
+        f"✅ {wins} | ❌ {loses} | ⏳ {pending}"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -157,7 +145,6 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 10000)
     await site.start()
-    print("Web server started on port 10000")
 
 async def main():
     await on_startup()
@@ -166,3 +153,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
