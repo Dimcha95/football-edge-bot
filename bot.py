@@ -1,10 +1,11 @@
+
 import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
@@ -18,6 +19,27 @@ dp = Dispatcher()
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+async def set_commands():
+    # Команды для всех пользователей
+    await bot.set_my_commands(
+        commands=[
+            BotCommand(command="start", description="Запуск бота")
+        ],
+        scope=BotCommandScopeDefault()
+    )
+
+    # Команды только для админов
+    for admin_id in ADMIN_IDS:
+        await bot.set_my_commands(
+            commands=[
+                BotCommand(command="start", description="Запуск бота"),
+                BotCommand(command="admin", description="Админ-панель"),
+                BotCommand(command="premium", description="Выдать премиум"),
+                BotCommand(command="unpremium", description="Снять премиум")
+            ],
+            scope=BotCommandScopeChat(chat_id=admin_id)
+        )
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -115,6 +137,7 @@ async def remove_premium(message: types.Message):
 
 async def on_startup():
     await init_db()
+    await set_commands()
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL, args=[bot])
     scheduler.start()
