@@ -1,7 +1,21 @@
+
 from aiogram import Bot
 from database import get_active_users, save_signal
 from services.odds import get_soccer_odds, parse_matches
 from services.model import estimate_totals, check_value
+import aiosqlite
+
+DB_PATH = "edge_bot.db"
+
+async def is_signal_sent(match_name: str, market: str) -> bool:
+    """Проверяет, отправляли ли уже такой сигнал"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id FROM signals WHERE match_name = ? AND market = ?",
+            (match_name, market)
+        )
+        row = await cursor.fetchone()
+        return row is not None
 
 async def check_and_send(bot: Bot):
     print("Проверяю матчи...")
@@ -50,6 +64,12 @@ async def check_and_send(bot: Bot):
                 candidates.append(("ТБ 3.5", odds["over_35"], totals["over_35"], edge))
 
         for market, price, prob, edge in candidates:
+            match_name = f"{match['home']} - {match['away']}"
+
+            # Проверяем, не отправляли ли уже
+            if await is_signal_sent(match_name, market):
+                continue
+
             text = (
                 f"⚽️ <b>{match['home']} — {match['away']}</b>\n"
                 f"🏆 {match['league']}\n"
@@ -60,14 +80,7 @@ async def check_and_send(bot: Bot):
                 f"#value #over"
             )
 
-            await save_signal(
-                f"{match['home']} - {match['away']}",
-                match["league"],
-                market,
-                price,
-                prob,
-                edge
-            )
+            await save_signal(match_name, match["league"], market, price, prob, edge)
 
             for uid in users:
                 try:
