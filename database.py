@@ -83,3 +83,18 @@ async def get_users_count():
         active = (await (await db.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")).fetchone())[0]
         premium = (await (await db.execute("SELECT COUNT(*) FROM users WHERE is_premium = 1")).fetchone())[0]
         return total, active, premium
+
+async def update_signal_result(signal_id: int, result: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE signals SET result = ? WHERE id = ?",
+            (result, signal_id)
+        )
+        await db.commit()
+
+async def get_pending_signals():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id, match_name, market, created_at FROM signals WHERE result = 'pending' ORDER BY id DESC LIMIT 20"
+        )
+        return await cursor.fetchall()
