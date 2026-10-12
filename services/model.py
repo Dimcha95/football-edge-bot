@@ -1,9 +1,13 @@
 def calculate_over_probability(avg_goals_home: float, avg_goals_away: float, 
                                 avg_conceded_home: float, avg_conceded_away: float,
+                                form_home: float, form_away: float,
                                 line: float) -> float:
     expected_home = (avg_goals_home + avg_conceded_away) / 2
     expected_away = (avg_goals_away + avg_conceded_home) / 2
-    expected_total = expected_home + expected_away
+    
+    # Корректировка на форму (form от 0 до 1, где 1 = отличная форма)
+    form_factor = 1 + (form_home + form_away - 1) * 0.15
+    expected_total = (expected_home + expected_away) * form_factor
     
     if line == 0.5:
         base_prob = min(0.95, 0.5 + (expected_total - 0.5) * 0.15)
@@ -25,6 +29,6 @@ def calculate_edge(our_prob: float, odds: float) -> float:
     return (our_prob * odds) - 1
 
 
-def is_value_bet(our_prob: float, odds: float, min_edge: float = 0.05) -> bool:
+def is_value_bet(our_prob: float, odds: float, min_edge: float = 0.08) -> bool:
     edge = calculate_edge(our_prob, odds)
-    return edge >= min_edge and our_prob >= 0.45
+    return edge >= min_edge and our_prob >= 0.50
