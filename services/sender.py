@@ -99,4 +99,3 @@ async def check_and_send(bot: Bot):
             sent += 1
 
     print(f"Отправлено сигналов: {sent} (всего сегодня: {sent_today + sent})")
-
