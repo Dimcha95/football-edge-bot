@@ -1,4 +1,5 @@
-from aiogram import Bot
+
+ from aiogram import Bot
 from database import get_users_for_signals, save_signal, is_signal_sent
 from services.odds import get_soccer_odds, parse_matches
 from services.model import estimate_totals, check_value
@@ -98,5 +99,4 @@ async def check_and_send(bot: Bot):
             sent += 1
 
     print(f"Отправлено сигналов: {sent} (всего сегодня: {sent_today + sent})")
- 
 
