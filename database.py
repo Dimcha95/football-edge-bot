@@ -1,3 +1,4 @@
+
 import aiosqlite
 from datetime import datetime, timedelta
 
@@ -158,5 +159,3 @@ async def get_today_signals_count():
         cursor = await db.execute(
             "SELECT COUNT(*) FROM signals WHERE date(created_at) = ?",
             (today,)
-        )
-        return (await cursor.fetchone())[0]
