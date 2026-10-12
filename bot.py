@@ -1,3 +1,4 @@
+
 import asyncio
 from dotenv import load_dotenv
 
@@ -150,6 +151,3 @@ async def main():
     await start_web_server()
     await asyncio.sleep(5)
     await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
