@@ -1,101 +1,71 @@
+import aiohttp
+from config import ODDS_API_KEY
+from database import get_users_for_signals, save_signal, is_signal_sent, get_today_signals_count
+from services.model import calculate_over_probability, calculate_edge, is_value_bet
 
- from aiogram import Bot
-from database import get_users_for_signals, save_signal, is_signal_sent
-from services.odds import get_soccer_odds, parse_matches
-from services.model import estimate_totals, check_value
-from datetime import datetime
-import aiosqlite
+MAX_SIGNALS_PER_DAY = 15
 
-async def check_and_send(bot: Bot):
+async def get_odds():
+    url = "https://api.the-odds-api.com/v4/sports/soccer/odds"
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "eu",
+        "markets": "totals",
+        "oddsFormat": "decimal"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                return []
+            return await resp.json()
+
+async def check_and_send(bot):
     print("Проверяю матчи...")
-    raw = await get_soccer_odds()
-    if not raw:
-        print("Нет данных от API")
+    today_count = await get_today_signals_count()
+    if today_count >= MAX_SIGNALS_PER_DAY:
+        print(f"Лимит: {today_count}")
         return
-
-    matches = parse_matches(raw)
-    print(f"Найдено матчей: {len(matches)}")
-
+    matches = await get_odds()
+    print(f"Матчей: {len(matches)}")
     users = await get_users_for_signals()
     if not users:
-        print("Нет пользователей для рассылки")
+        print("Нет пользователей")
         return
-
-    # Лимит 15 сигналов в день
-    today = datetime.utcnow().date().isoformat()
-    async with aiosqlite.connect("edge_bot.db") as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM signals WHERE date(created_at) = ?",
-            (today,)
-        )
-        sent_today = (await cursor.fetchone())[0]
-
-    if sent_today >= 15:
-        print(f"Лимит 15 сигналов в день уже достигнут ({sent_today})")
-        return
-
     sent = 0
     for match in matches:
-        if sent_today + sent >= 15:
-            print("Достигнут дневной лимит 15 сигналов")
+        if today_count + sent >= MAX_SIGNALS_PER_DAY:
             break
-
-        totals = estimate_totals(
-            match["home_strength"],
-            match["away_strength"],
-            home_form=1.0,
-            away_form=1.0,
-            home_avg_goals=1.5,
-            away_avg_goals=1.2,
-            home_avg_conceded=1.0,
-            away_avg_conceded=1.3
-        )
-
-        odds = match["odds"]
-        candidates = []
-
-        if "over_15" in odds:
-            ok, edge = check_value(odds["over_15"], totals["over_15"])
-            if ok:
-                candidates.append(("ТБ 1.5", odds["over_15"], totals["over_15"], edge))
-
-        if "over_25" in odds:
-            ok, edge = check_value(odds["over_25"], totals["over_25"])
-            if ok:
-                candidates.append(("ТБ 2.5", odds["over_25"], totals["over_25"], edge))
-
-        if "over_35" in odds:
-            ok, edge = check_value(odds["over_35"], totals["over_35"])
-            if ok:
-                candidates.append(("ТБ 3.5", odds["over_35"], totals["over_35"], edge))
-
-        for market, price, prob, edge in candidates:
-            if sent_today + sent >= 15:
-                break
-
-            match_name = f"{match['home']} - {match['away']}"
-
-            if await is_signal_sent(match_name, market):
-                continue
-
-            text = (
-                f"⚽️ <b>{match['home']} — {match['away']}</b>\n"
-                f"🏆 {match['league']}\n"
-                f"🕐 {match['time']} UTC\n\n"
-                f"🎯 <b>{market}</b> @ <b>{price}</b>\n"
-                f"📊 Вероятность: <b>{prob*100:.1f}%</b>\n"
-                f"📈 Edge: <b>+{edge*100:.1f}%</b>\n\n"
-                f"#value #over"
-            )
-
-            await save_signal(match_name, match["league"], market, price, prob, edge)
-
-            for uid in users:
-                try:
-                    await bot.send_message(uid, text, parse_mode="HTML")
-                except Exception:
-                    pass
-
-            sent += 1
-
-    print(f"Отправлено сигналов: {sent} (всего сегодня: {sent_today + sent})")
+        home = match.get("home_team", "")
+        away = match.get("away_team", "")
+        league = match.get("sport_title", "")
+        match_name = f"{home} — {away}"
+        for bookmaker in match.get("bookmakers", []):
+            for market in bookmaker.get("markets", []):
+                if market.get("key") != "totals":
+                    continue
+                for outcome in market.get("outcomes", []):
+                    if outcome.get("name") != "Over":
+                        continue
+                    line = outcome.get("point", 2.5)
+                    odds = outcome.get("price", 0)
+                    if odds < 1.5 or odds > 3.0:
+                        continue
+                    avg_goals = 1.3
+                    avg_conceded = 1.2
+                    our_prob = calculate_over_probability(avg_goals, avg_goals, avg_conceded, avg_conceded, line)
+                    edge = calculate_edge(our_prob, odds)
+                    if not is_value_bet(our_prob, odds, min_edge=0.05):
+                        continue
+                    market_name = f"ТБ {line}"
+                    if await is_signal_sent(match_name, market_name):
+                        continue
+                    text = f"⚽️ <b>{match_name}</b>\n🏆 {league}\n\n🎯 <b>{market_name}</b> @ {odds:.2f}\n📊 Вероятность: <b>{our_prob*100:.0f}%</b>\n📈 Edge: <b>+{edge*100:.1f}%</b>"
+                    for user_id in users:
+                        try:
+                            await bot.send_message(user_id, text, parse_mode="HTML")
+                        except:
+                            pass
+                    await save_signal(match_name, league, market_name, odds, our_prob, edge)
+                    sent += 1
+                    break
+    print(f"Отправлено: {sent}")
