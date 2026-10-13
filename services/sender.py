@@ -1,3 +1,25 @@
+import aiohttp
+from config import ODDS_API_KEY
+from database import get_users_for_signals, save_signal, is_signal_sent, get_today_signals_count
+from services.model import calculate_over_probability, calculate_edge, is_value_bet
+from services.stats import get_team_stats
+
+MAX_SIGNALS_PER_DAY = 15
+
+async def get_odds():
+    url = "https://api.the-odds-api.com/v4/sports/soccer/odds"
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "eu",
+        "markets": "totals",
+        "oddsFormat": "decimal"
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                return []
+            return await resp.json()
+
 async def check_and_send(bot):
     print("=== check_and_send вызван ===")
     print("Проверяю матчи...")
