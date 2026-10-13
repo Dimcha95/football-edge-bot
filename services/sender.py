@@ -60,7 +60,6 @@ async def check_and_send(bot):
                     line = outcome.get("point", 2.5)
                     odds = outcome.get("price", 0)
                     
-                    # Очень мягкий фильтр
                     if odds < 1.20 or odds > 5.0:
                         continue
                     
@@ -72,7 +71,8 @@ async def check_and_send(bot):
                     )
                     edge = calculate_edge(our_prob, odds)
                     
-                    # Минимальный edge 1%
+                    print(f"{match_name} | ТБ {line} | odds={odds:.2f} | prob={our_prob:.2f} | edge={edge:.3f}")
+                    
                     if edge < 0.01:
                         continue
                     
