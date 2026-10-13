@@ -10,9 +10,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
 from database import (
     init_db, add_user, set_user_active, get_stats, get_users_count,
-    set_premium, get_today_signals_count, get_stats_period, get_today_signals
+    set_premium, get_today_signals_count, get_stats_period, get_today_signals,
+    update_signal_result
 )
-from services.sender import check_and_send
+from services.sender import check_and_send, update_results
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -32,7 +33,8 @@ async def set_commands():
                 BotCommand(command="admin", description="Админ-панель"),
                 BotCommand(command="today", description="Сигналы за сегодня"),
                 BotCommand(command="premium", description="Выдать премиум"),
-                BotCommand(command="unpremium", description="Снять премиум")
+                BotCommand(command="unpremium", description="Снять премиум"),
+                BotCommand(command="result", description="Обновить результат")
             ],
             scope=BotCommandScopeChat(chat_id=admin_id)
         )
@@ -137,6 +139,26 @@ async def today_stats(message: types.Message):
     count = await get_today_signals_count()
     await message.answer(f"📊 <b>Сигналов сегодня:</b> {count} / 30", parse_mode="HTML")
 
+@dp.message(Command("result"))
+async def set_result(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        parts = message.text.split("|")
+        if len(parts) != 3:
+            await message.answer("Формат: /result Матч|ТБ 2.5|win")
+            return
+        match_name = parts[0].replace("/result ", "").strip()
+        market = parts[1].strip()
+        result = parts[2].strip().lower()
+        if result not in ("win", "lose"):
+            await message.answer("Результат должен быть win или lose")
+            return
+        await update_signal_result(match_name, market, result)
+        await message.answer(f"✅ Результат обновлён:\n{match_name}\n{market} → {result}")
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
 @dp.message(Command("admin"))
 async def admin_cmd(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -180,6 +202,7 @@ async def on_startup():
     await set_commands()
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL, args=[bot])
+    scheduler.add_job(update_results, "interval", minutes=10)
     scheduler.start()
     print(f"Планировщик запущен, интервал: {CHECK_INTERVAL} мин")
     print("Football Edge Bot запущен")
