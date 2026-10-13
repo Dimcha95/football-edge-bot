@@ -140,3 +140,22 @@ async def get_today_signals_count():
         today = datetime.utcnow().date().isoformat()
         cursor = await db.execute("SELECT COUNT(*) FROM signals WHERE date(created_at) = ?", (today,))
         return (await cursor.fetchone())[0]
+        async def update_signal_result(match_name: str, market: str, result: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE signals SET result = ? WHERE match_name = ? AND market = ? AND result = 'pending'",
+            (result, match_name, market)
+        )
+        await db.commit()
+
+async def get_today_signals():
+    async with aiosqlite.connect(DB_PATH) as db:
+        today = datetime.utcnow().date().isoformat()
+        cursor = await db.execute("""
+            SELECT match_name, market, odds, result 
+            FROM signals 
+            WHERE date(created_at) = ?
+            ORDER BY created_at
+        """, (today,))
+        return await cursor.fetchall()
+        
