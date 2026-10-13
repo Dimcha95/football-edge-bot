@@ -1,6 +1,9 @@
 import aiohttp
 from config import ODDS_API_KEY
-from database import get_users_for_signals, save_signal, is_signal_sent, get_today_signals_count
+from database import (
+    get_users_for_signals, save_signal, is_signal_sent, 
+    get_today_signals_count, update_signal_result
+)
 from services.model import calculate_over_probability, calculate_edge
 from services.stats import get_team_stats
 
@@ -19,6 +22,49 @@ async def get_odds():
             if resp.status != 200:
                 return []
             return await resp.json()
+
+async def update_results():
+    """Автоматически обновляет результаты матчей"""
+    print("Обновляю результаты...")
+    url = "https://api.the-odds-api.com/v4/sports/soccer/scores"
+    params = {"apiKey": ODDS_API_KEY, "daysFrom": 1}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return
+                scores = await resp.json()
+        
+        for game in scores:
+            if not game.get("completed"):
+                continue
+            
+            home = game.get("home_team", "")
+            away = game.get("away_team", "")
+            match_name = f"{home} — {away}"
+            
+            home_score = 0
+            away_score = 0
+            for score in game.get("scores", []):
+                if score.get("name") == home:
+                    home_score = int(score.get("score", 0))
+                elif score.get("name") == away:
+                    away_score = int(score.get("score", 0))
+            
+            total_goals = home_score + away_score
+            
+            # Обновляем основные тоталы
+            for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
+                market = f"ТБ {line}"
+                if total_goals > line:
+                    await update_signal_result(match_name, market, "win")
+                else:
+                    await update_signal_result(match_name, market, "lose")
+            
+            print(f"Обновлён: {match_name} ({total_goals} голов)")
+    except Exception as e:
+        print(f"Ошибка обновления: {e}")
 
 async def check_and_send(bot):
     print("=== check_and_send вызван ===")
@@ -46,7 +92,6 @@ async def check_and_send(bot):
         league = match.get("sport_title", "")
         match_name = f"{home} — {away}"
         
-        # Получаем статистику с таймаутом
         home_stats = await get_team_stats(home)
         away_stats = await get_team_stats(away)
         
