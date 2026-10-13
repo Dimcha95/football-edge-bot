@@ -45,7 +45,6 @@ async def check_and_send(bot):
         league = match.get("sport_title", "")
         match_name = f"{home} — {away}"
         
-        # Фиксированные значения (без API-Football)
         avg_goals = 1.3
         avg_conceded = 1.2
         form = 0.5
@@ -69,8 +68,9 @@ async def check_and_send(bot):
                     )
                     edge = calculate_edge(our_prob, odds)
                     
-                    if edge < 0.02:
-                        continue
+                    # Фильтр по edge временно отключён
+                    # if edge < 0.02:
+                    #     continue
                     
                     market_name = f"ТБ {line}"
                     if await is_signal_sent(match_name, market_name):
@@ -92,7 +92,7 @@ async def check_and_send(bot):
                     
                     await save_signal(match_name, league, market_name, odds, our_prob, edge)
                     sent += 1
-                    print(f"Отправлен: {match_name} {market_name} edge={edge:.3f}")
+                    print(f"Отправлен: {match_name} {market_name}")
                     break
     
     print(f"Отправлено: {sent}")
