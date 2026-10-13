@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
 from database import (
     init_db, add_user, set_user_active, get_stats, get_users_count,
-    set_premium, get_today_signals_count, get_stats_period
+    set_premium, get_today_signals_count, get_stats_period, get_today_signals
 )
 from services.sender import check_and_send
 
@@ -44,7 +44,8 @@ async def cmd_start(message: types.Message):
         [InlineKeyboardButton(text="✅ Включить сигналы", callback_data="signals_on")],
         [InlineKeyboardButton(text="❌ Выключить", callback_data="signals_off")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="stats_periods")]
+        [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="stats_periods")],
+        [InlineKeyboardButton(text="📅 Сводка за сегодня", callback_data="today_summary")]
     ])
     await message.answer(
         "⚽️ <b>Football Edge Bot</b>\n\n"
@@ -106,10 +107,35 @@ async def show_period_stats(callback: types.CallbackQuery):
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
+@dp.callback_query(F.data == "today_summary")
+async def today_summary(callback: types.CallbackQuery):
+    signals = await get_today_signals()
+    if not signals:
+        await callback.message.answer("Сегодня сигналов ещё не было.")
+        await callback.answer()
+        return
+    
+    text = "📊 <b>Сводка за сегодня</b>\n\n"
+    profit = 0.0
+    
+    for match, market, odds, result in signals:
+        if result == "win":
+            text += f"✅ {market} @ {odds:.2f} — {match}\n"
+            profit += odds - 1
+        elif result == "lose":
+            text += f"❌ {market} @ {odds:.2f} — {match}\n"
+            profit -= 1
+        else:
+            text += f"⏳ {market} @ {odds:.2f} — {match}\n"
+    
+    text += f"\n💰 Флэт за день: <b>{profit:+.2f}</b> ед."
+    await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
+
 @dp.message(Command("today"))
 async def today_stats(message: types.Message):
     count = await get_today_signals_count()
-    await message.answer(f"📊 <b>Сигналов сегодня:</b> {count} / 15", parse_mode="HTML")
+    await message.answer(f"📊 <b>Сигналов сегодня:</b> {count} / 30", parse_mode="HTML")
 
 @dp.message(Command("admin"))
 async def admin_cmd(message: types.Message):
