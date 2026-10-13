@@ -1,4 +1,5 @@
 import aiohttp
+import aiosqlite
 from config import ODDS_API_KEY
 from database import (
     get_users_for_signals, save_signal, is_signal_sent, 
@@ -40,29 +41,42 @@ async def update_results():
             if not game.get("completed"):
                 continue
             
-            home = game.get("home_team", "")
-            away = game.get("away_team", "")
-            match_name = f"{home} — {away}"
+            home = game.get("home_team", "").lower()
+            away = game.get("away_team", "").lower()
             
             home_score = 0
             away_score = 0
             for score in game.get("scores", []):
-                if score.get("name") == home:
+                name = score.get("name", "").lower()
+                if name == home:
                     home_score = int(score.get("score", 0))
-                elif score.get("name") == away:
+                elif name == away:
                     away_score = int(score.get("score", 0))
             
             total_goals = home_score + away_score
             
-            # Обновляем основные тоталы
-            for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
-                market = f"ТБ {line}"
-                if total_goals > line:
-                    await update_signal_result(match_name, market, "win")
-                else:
-                    await update_signal_result(match_name, market, "lose")
+            async with aiosqlite.connect("edge_bot.db") as db:
+                cursor = await db.execute(
+                    "SELECT match_name, market FROM signals WHERE result = 'pending'"
+                )
+                pending = await cursor.fetchall()
             
-            print(f"Обновлён: {match_name} ({total_goals} голов)")
+            for db_match, market in pending:
+                db_lower = db_match.lower()
+                if home in db_lower or away in db_lower:
+                    try:
+                        line = float(market.replace("ТБ ", "").replace("ТМ ", ""))
+                    except:
+                        continue
+                    
+                    if "ТБ" in market:
+                        result = "win" if total_goals > line else "lose"
+                    else:
+                        result = "win" if total_goals < line else "lose"
+                    
+                    await update_signal_result(db_match, market, result)
+                    print(f"Обновлён: {db_match} → {result} ({total_goals} голов)")
+                    
     except Exception as e:
         print(f"Ошибка обновления: {e}")
 
