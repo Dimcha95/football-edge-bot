@@ -60,8 +60,8 @@ async def check_and_send(bot):
                     line = outcome.get("point", 2.5)
                     odds = outcome.get("price", 0)
                     
-                    # Более мягкий фильтр по коэффициентам
-                    if odds < 1.40 or odds > 3.50:
+                    # Очень мягкий фильтр
+                    if odds < 1.20 or odds > 5.0:
                         continue
                     
                     our_prob = calculate_over_probability(
@@ -72,8 +72,8 @@ async def check_and_send(bot):
                     )
                     edge = calculate_edge(our_prob, odds)
                     
-                    # Снижен минимальный edge до 3%
-                    if not is_value_bet(our_prob, odds, min_edge=0.03):
+                    # Минимальный edge 1%
+                    if edge < 0.01:
                         continue
                     
                     market_name = f"ТБ {line}"
