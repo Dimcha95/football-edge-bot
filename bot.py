@@ -155,6 +155,7 @@ async def on_startup():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL, args=[bot])
     scheduler.start()
+    print(f"Планировщик запущен, интервал: {CHECK_INTERVAL} мин")
     print("Football Edge Bot запущен")
 
 async def main():
