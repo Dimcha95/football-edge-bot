@@ -1,6 +1,6 @@
 import aiohttp
 import aiosqlite
-from config import ODDS_API_KEY
+from config import ODDS_API_KEY, API_FOOTBALL_KEY
 from database import (
     get_users_for_signals, save_signal, is_signal_sent, 
     get_today_signals_count, update_signal_result
@@ -24,61 +24,94 @@ async def get_odds():
                 return []
             return await resp.json()
 
-async def update_results():
-    """Автоматически обновляет результаты матчей"""
-    print("Обновляю результаты...")
+async def get_scores_odds_api():
+    """Получает результаты из The Odds API"""
     url = "https://api.the-odds-api.com/v4/sports/soccer/scores"
     params = {"apiKey": ODDS_API_KEY, "daysFrom": 1}
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    return
-                scores = await resp.json()
+                    return []
+                return await resp.json()
+    except:
+        return []
+
+async def get_scores_api_football():
+    """Получает результаты из API-Football"""
+    if not API_FOOTBALL_KEY:
+        return []
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    url = "https://v3.football.api-sports.io/fixtures"
+    params = {"date": "2026-10-13", "status": "FT"}  # Сегодня, завершённые
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data.get("response", [])
+    except:
+        return []
+
+async def update_results():
+    """Обновляет результаты из двух источников"""
+    print("Обновляю результаты...")
+    
+    # 1. The Odds API
+    odds_scores = await get_scores_odds_api()
+    for game in odds_scores:
+        if not game.get("completed"):
+            continue
+        home = game.get("home_team", "").lower()
+        away = game.get("away_team", "").lower()
         
-        for game in scores:
-            if not game.get("completed"):
+        home_score = away_score = 0
+        for score in game.get("scores", []):
+            name = score.get("name", "").lower()
+            if name == home:
+                home_score = int(score.get("score", 0))
+            elif name == away:
+                away_score = int(score.get("score", 0))
+        
+        total = home_score + away_score
+        await _update_matching_signals(home, away, total)
+    
+    # 2. API-Football
+    football_scores = await get_scores_api_football()
+    for fixture in football_scores:
+        teams = fixture.get("teams", {})
+        home = teams.get("home", {}).get("name", "").lower()
+        away = teams.get("away", {}).get("name", "").lower()
+        goals = fixture.get("goals", {})
+        home_goals = goals.get("home", 0) or 0
+        away_goals = goals.get("away", 0) or 0
+        total = home_goals + away_goals
+        await _update_matching_signals(home, away, total)
+
+async def _update_matching_signals(home: str, away: str, total_goals: int):
+    """Ищет совпадения в базе и обновляет результаты"""
+    async with aiosqlite.connect("edge_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT match_name, market FROM signals WHERE result = 'pending'"
+        )
+        pending = await cursor.fetchall()
+    
+    for db_match, market in pending:
+        db_lower = db_match.lower()
+        if home in db_lower or away in db_lower:
+            try:
+                line = float(market.replace("ТБ ", "").replace("ТМ ", ""))
+            except:
                 continue
             
-            home = game.get("home_team", "").lower()
-            away = game.get("away_team", "").lower()
+            if "ТБ" in market:
+                result = "win" if total_goals > line else "lose"
+            else:
+                result = "win" if total_goals < line else "lose"
             
-            home_score = 0
-            away_score = 0
-            for score in game.get("scores", []):
-                name = score.get("name", "").lower()
-                if name == home:
-                    home_score = int(score.get("score", 0))
-                elif name == away:
-                    away_score = int(score.get("score", 0))
-            
-            total_goals = home_score + away_score
-            
-            async with aiosqlite.connect("edge_bot.db") as db:
-                cursor = await db.execute(
-                    "SELECT match_name, market FROM signals WHERE result = 'pending'"
-                )
-                pending = await cursor.fetchall()
-            
-            for db_match, market in pending:
-                db_lower = db_match.lower()
-                if home in db_lower or away in db_lower:
-                    try:
-                        line = float(market.replace("ТБ ", "").replace("ТМ ", ""))
-                    except:
-                        continue
-                    
-                    if "ТБ" in market:
-                        result = "win" if total_goals > line else "lose"
-                    else:
-                        result = "win" if total_goals < line else "lose"
-                    
-                    await update_signal_result(db_match, market, result)
-                    print(f"Обновлён: {db_match} → {result} ({total_goals} голов)")
-                    
-    except Exception as e:
-        print(f"Ошибка обновления: {e}")
+            await update_signal_result(db_match, market, result)
+            print(f"Обновлён: {db_match} → {result} ({total_goals} голов)")
 
 async def check_and_send(bot):
     print("=== check_and_send вызван ===")
