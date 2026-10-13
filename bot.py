@@ -6,12 +6,13 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
 from database import (
     init_db, add_user, set_user_active, get_stats, get_users_count,
     set_premium, get_today_signals_count, get_stats_period, get_today_signals,
-    update_signal_result
+    update_signal_result, get_users_for_signals
 )
 from services.sender import check_and_send, update_results
 
@@ -134,6 +135,35 @@ async def today_summary(callback: types.CallbackQuery):
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
+async def send_daily_summary():
+    """Автоматическая сводка в 23:59"""
+    signals = await get_today_signals()
+    if not signals:
+        return
+    
+    text = "📊 <b>Сводка за сегодня</b>\n\n"
+    profit = 0.0
+    
+    for match, market, odds, result in signals:
+        if result == "win":
+            text += f"✅ {market} @ {odds:.2f} — {match}\n"
+            profit += odds - 1
+        elif result == "lose":
+            text += f"❌ {market} @ {odds:.2f} — {match}\n"
+            profit -= 1
+        else:
+            text += f"⏳ {market} @ {odds:.2f} — {match}\n"
+    
+    text += f"\n💰 Флэт за день: <b>{profit:+.2f}</b> ед."
+    
+    users = await get_users_for_signals()
+    for user_id in users:
+        try:
+            await bot.send_message(user_id, text, parse_mode="HTML")
+        except:
+            pass
+    print("Сводка за день отправлена")
+
 @dp.message(Command("today"))
 async def today_stats(message: types.Message):
     count = await get_today_signals_count()
@@ -203,6 +233,7 @@ async def on_startup():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL, args=[bot])
     scheduler.add_job(update_results, "interval", minutes=10)
+    scheduler.add_job(send_daily_summary, CronTrigger(hour=23, minute=59))
     scheduler.start()
     print(f"Планировщик запущен, интервал: {CHECK_INTERVAL} мин")
     print("Football Edge Bot запущен")
