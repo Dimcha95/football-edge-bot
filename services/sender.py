@@ -2,7 +2,6 @@ import aiohttp
 from config import ODDS_API_KEY
 from database import get_users_for_signals, save_signal, is_signal_sent, get_today_signals_count
 from services.model import calculate_over_probability, calculate_edge, is_value_bet
-from services.stats import get_team_stats
 
 MAX_SIGNALS_PER_DAY = 15
 
@@ -46,8 +45,9 @@ async def check_and_send(bot):
         league = match.get("sport_title", "")
         match_name = f"{home} — {away}"
         
-        home_stats = await get_team_stats(home)
-        away_stats = await get_team_stats(away)
+        # Временные значения без API-Football
+        home_stats = {"avg_goals": 1.3, "avg_conceded": 1.2, "form": 0.5}
+        away_stats = {"avg_goals": 1.3, "avg_conceded": 1.2, "form": 0.5}
         
         for bookmaker in match.get("bookmakers", []):
             for market in bookmaker.get("markets", []):
@@ -86,8 +86,7 @@ async def check_and_send(bot):
                         f"🏆 {league}\n\n"
                         f"🎯 <b>{market_name}</b> @ {odds:.2f}\n"
                         f"📊 Вероятность: <b>{our_prob*100:.0f}%</b>\n"
-                        f"📈 Edge: <b>+{edge*100:.1f}%</b>\n"
-                        f"📝 Форма: {home_stats['form']*100:.0f}% / {away_stats['form']*100:.0f}%"
+                        f"📈 Edge: <b>+{edge*100:.1f}%</b>"
                     )
                     
                     for user_id in users:
