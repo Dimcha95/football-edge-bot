@@ -1,9 +1,6 @@
-import aiohttp
-from config import API_FOOTBALL_KEY
-
 async def get_team_stats(team_name: str) -> dict:
-    """Получает статистику команды с таймаутом"""
-    default = {"avg_goals": 1.3, "avg_conceded": 1.2, "form": 0.5}
+    """Получает статистику команды включая xG"""
+    default = {"avg_goals": 1.3, "avg_conceded": 1.2, "form": 0.5, "xg": 1.3}
     
     if not API_FOOTBALL_KEY:
         return default
@@ -38,6 +35,11 @@ async def get_team_stats(team_name: str) -> dict:
                 played = s.get("fixtures", {}).get("played", {}).get("total", 1) or 1
                 goals_for = s.get("goals", {}).get("for", {}).get("total", {}).get("total", 0) or 0
                 goals_against = s.get("goals", {}).get("against", {}).get("total", {}).get("total", 0) or 0
+                
+                # xG (если доступно)
+                xg_for = s.get("goals", {}).get("for", {}).get("expected", {}).get("total", 0) or goals_for
+                xg_against = s.get("goals", {}).get("against", {}).get("expected", {}).get("total", 0) or goals_against
+                
                 form_str = s.get("form", "") or ""
                 wins = form_str.count("W")
                 form = wins / max(len(form_str), 1) if form_str else 0.5
@@ -45,7 +47,9 @@ async def get_team_stats(team_name: str) -> dict:
                 return {
                     "avg_goals": round(goals_for / played, 2),
                     "avg_conceded": round(goals_against / played, 2),
-                    "form": round(form, 2)
+                    "form": round(form, 2),
+                    "xg": round(xg_for / played, 2),
+                    "xga": round(xg_against / played, 2)
                 }
     except:
         return default
