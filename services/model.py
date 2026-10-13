@@ -1,34 +1,36 @@
-def calculate_over_probability(avg_goals_home: float, avg_goals_away: float, 
-                                avg_conceded_home: float, avg_conceded_away: float,
-                                form_home: float, form_away: float,
-                                line: float) -> float:
+def calculate_over_probability(avg_goals_home, avg_goals_away, avg_conceded_home, avg_conceded_away, form_home, form_away, line):
+    """Улучшенная модель с учётом атаки и обороны"""
     expected_home = (avg_goals_home + avg_conceded_away) / 2
     expected_away = (avg_goals_away + avg_conceded_home) / 2
     
-    # Корректировка на форму (form от 0 до 1, где 1 = отличная форма)
-    form_factor = 1 + (form_home + form_away - 1) * 0.15
+    form_factor = 1 + (form_home + form_away - 1) * 0.2
     expected_total = (expected_home + expected_away) * form_factor
     
-    if line == 0.5:
-        base_prob = min(0.95, 0.5 + (expected_total - 0.5) * 0.15)
-    elif line == 1.5:
-        base_prob = min(0.92, 0.45 + (expected_total - 1.5) * 0.18)
-    elif line == 2.5:
-        base_prob = min(0.88, 0.38 + (expected_total - 2.5) * 0.16)
-    elif line == 3.5:
-        base_prob = min(0.80, 0.28 + (expected_total - 3.5) * 0.14)
+    if line <= 0.5:
+        base_prob = 0.85
+    elif line <= 1.5:
+        base_prob = 0.70
+    elif line <= 2.5:
+        base_prob = 0.55
+    elif line <= 3.5:
+        base_prob = 0.40
     else:
-        base_prob = min(0.75, 0.25 + (expected_total - line) * 0.12)
+        base_prob = 0.25
     
-    return max(0.15, base_prob)
-
+    if expected_total > line + 0.5:
+        base_prob += 0.15
+    elif expected_total < line - 0.5:
+        base_prob -= 0.15
+    
+    return max(0.15, min(0.90, base_prob))
 
 def calculate_edge(our_prob: float, odds: float) -> float:
-    if odds <= 1.0:
+    """Считает edge"""
+    if odds <= 1:
         return 0
     return (our_prob * odds) - 1
 
-
-def is_value_bet(our_prob: float, odds: float, min_edge: float = 0.08) -> bool:
+def is_value_bet(our_prob: float, odds: float, min_edge: float = 0.03) -> bool:
+    """Проверяет, является ли ставка value"""
     edge = calculate_edge(our_prob, odds)
-    return edge >= min_edge and our_prob >= 0.50
+    return edge >= min_edge and our_prob >= 0.40
