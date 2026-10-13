@@ -54,6 +54,7 @@ async def check_and_send(bot):
                 if market.get("key") != "totals":
                     continue
                 for outcome in market.get("outcomes", []):
+                    print(f"Outcome: {outcome.get('name')} | point={outcome.get('point')} | price={outcome.get('price')}")
                     if outcome.get("name") != "Over":
                         continue
                     
