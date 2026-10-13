@@ -4,7 +4,7 @@ from database import get_users_for_signals, save_signal, is_signal_sent, get_tod
 from services.model import calculate_over_probability, calculate_edge
 from services.stats import get_team_stats
 
-MAX_SIGNALS_PER_DAY = 15
+MAX_SIGNALS_PER_DAY = 30
 
 async def get_odds():
     url = "https://api.the-odds-api.com/v4/sports/soccer/odds"
