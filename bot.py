@@ -274,7 +274,7 @@ async def on_startup():
     scheduler.add_job(update_results, "interval", minutes=15)
     scheduler.add_job(send_daily_summary, CronTrigger(hour=23, minute=59, timezone=moscow))
     scheduler.start()
-    print("Планировщик запущен (Москва, каждые 10 мин)")
+    print("Планировщик запущен (Москва, каждые 15 мин)")
     print("Football Edge Bot запущен")
 
 async def main():
