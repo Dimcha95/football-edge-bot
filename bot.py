@@ -1,5 +1,6 @@
 import asyncio
 import aiosqlite
+import pytz
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -19,6 +20,7 @@ from services.sender import check_and_send, update_results
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+moscow = pytz.timezone("Europe/Moscow")
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -260,12 +262,19 @@ async def remove_premium(message: types.Message):
 async def on_startup():
     await init_db()
     await set_commands()
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL, args=[bot])
-    scheduler.add_job(update_results, "interval", minutes=10)
-    scheduler.add_job(send_daily_summary, CronTrigger(hour=23, minute=59))
+    scheduler = AsyncIOScheduler(timezone=moscow)
+    
+    # Проверка сигналов с 8:00 до 23:59 каждые 15 минут
+    scheduler.add_job(
+        check_and_send, 
+        CronTrigger(hour="8-23", minute="*/10", timezone=moscow),
+        args=[bot]
+    )
+    
+    scheduler.add_job(update_results, "interval", minutes=15)
+    scheduler.add_job(send_daily_summary, CronTrigger(hour=23, minute=59, timezone=moscow))
     scheduler.start()
-    print(f"Планировщик запущен, интервал: {CHECK_INTERVAL} мин")
+    print("Планировщик запущен (Москва, каждые 10 мин)")
     print("Football Edge Bot запущен")
 
 async def main():
