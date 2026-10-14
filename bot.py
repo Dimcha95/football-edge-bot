@@ -1,4 +1,5 @@
 import asyncio
+import aiosqlite
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -74,14 +75,34 @@ async def signals_off(callback: types.CallbackQuery):
 async def show_stats(callback: types.CallbackQuery):
     total, wins, loses, pending = await get_stats()
     winrate = (wins / (wins + loses) * 100) if (wins + loses) > 0 else 0
+    
+    async with aiosqlite.connect("edge_bot.db") as db:
+        cursor = await db.execute("""
+            SELECT match_name, market, odds, result 
+            FROM signals 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """)
+        recent = await cursor.fetchall()
+    
     text = (
         "📊 <b>Статистика бота</b>\n\n"
-        f"Всего сигналов: <b>{total}</b>\n"
+        f"Всего: <b>{total}</b>\n"
         f"✅ Побед: <b>{wins}</b>\n"
         f"❌ Поражений: <b>{loses}</b>\n"
-        f"⏳ В ожидании: <b>{pending}</b>\n\n"
-        f"Winrate: <b>{winrate:.1f}%</b>"
+        f"⏳ В ожидании: <b>{pending}</b>\n"
+        f"Winrate: <b>{winrate:.1f}%</b>\n\n"
+        "<b>Последние сигналы:</b>\n"
     )
+    
+    for match, market, odds, result in recent:
+        if result == "win":
+            text += f"✅ {market} @ {odds:.2f} — {match}\n"
+        elif result == "lose":
+            text += f"❌ {market} @ {odds:.2f} — {match}\n"
+        else:
+            text += f"⏳ {market} @ {odds:.2f} — {match}\n"
+    
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
@@ -136,7 +157,6 @@ async def today_summary(callback: types.CallbackQuery):
     await callback.answer()
 
 async def send_daily_summary():
-    """Автоматическая сводка в 23:59"""
     signals = await get_today_signals()
     if not signals:
         return
