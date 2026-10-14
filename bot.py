@@ -1,6 +1,7 @@
 import asyncio
 import aiosqlite
 import pytz
+from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -75,6 +76,9 @@ async def signals_off(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
+    await show_stats_page(callback, page=0)
+
+async def show_stats_page(callback: types.CallbackQuery, page: int = 0):
     total, wins, loses, pending = await get_stats()
     decided = wins + loses
     winrate = (wins / decided * 100) if decided > 0 else 0
@@ -93,30 +97,52 @@ async def show_stats(callback: types.CallbackQuery):
                 profit -= 1
         
         cursor = await db.execute("""
-            SELECT match_name, market, odds, result, our_prob, edge
+            SELECT match_name, market, odds, result, our_prob, edge, created_at
             FROM signals 
-            ORDER BY created_at DESC 
-            LIMIT 8
+            ORDER BY created_at DESC
         """)
-        recent = await cursor.fetchall()
+        all_recent = await cursor.fetchall()
     
     roi = (profit / decided * 100) if decided > 0 else 0
+    per_page = 5
+    start = page * per_page
+    end = start + per_page
+    recent = all_recent[start:end]
     
     text = (
         "📊 <b>Эффективность</b>\n\n"
         f"Проходимость <b>{winrate:.0f}%</b> · сыграно <b>{decided}</b>\n"
         f"✅ {wins}  ❌ {loses}  ⏳ {pending}\n"
         f"Прибыль: <b>{profit:+.1f}</b> ед. · ROI: <b>{roi:+.1f}%</b>\n\n"
-        "<b>Последние результаты:</b>\n"
+        f"<b>Результаты (стр. {page+1}):</b>\n"
     )
     
-    for match, market, odds, result, prob, edge in recent:
+    for match, market, odds, result, prob, edge, created_at in recent:
         icon = "✅" if result == "win" else "❌" if result == "lose" else "⏳"
-        text += f"\n{icon} {match}\n"
-        text += f"{market} @ {odds:.2f} · edge +{edge*100:.1f}%\n"
+        try:
+            date = datetime.fromisoformat(created_at).strftime("%d.%m")
+        except:
+            date = "—"
+        text += f"\n{icon} {match}\n{market} @ {odds:.2f} · {date} · edge +{edge*100:.1f}%\n"
     
-    await callback.message.answer(text, parse_mode="HTML")
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"stats_page_{page-1}"))
+    if end < len(all_recent):
+        buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"stats_page_{page+1}"))
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
+
+@dp.callback_query(F.data.startswith("stats_page_"))
+async def stats_page(callback: types.CallbackQuery):
+    page = int(callback.data.split("_")[-1])
+    await show_stats_page(callback, page)
 
 @dp.callback_query(F.data == "stats_periods")
 async def stats_periods(callback: types.CallbackQuery):
@@ -264,20 +290,17 @@ async def on_startup():
     await set_commands()
     scheduler = AsyncIOScheduler(timezone=moscow)
     
-    # Сигналы: с 8:00 до 23:59 каждые 15 минут
     scheduler.add_job(
         check_and_send, 
         CronTrigger(hour="8-23", minute="*/15", timezone=moscow),
         args=[bot]
     )
     
-    # Результаты: каждый час с 12:00 до 02:00
     scheduler.add_job(
         update_results,
         CronTrigger(hour="12-23,0-2", minute=0, timezone=moscow)
     )
     
-    # Сводка в 23:59
     scheduler.add_job(send_daily_summary, CronTrigger(hour=23, minute=59, timezone=moscow))
     scheduler.start()
     print("Планировщик запущен (сигналы каждые 15 мин, результаты каждый час 12:00-02:00)")
