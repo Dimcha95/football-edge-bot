@@ -74,34 +74,44 @@ async def signals_off(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
     total, wins, loses, pending = await get_stats()
-    winrate = (wins / (wins + loses) * 100) if (wins + loses) > 0 else 0
+    decided = wins + loses
+    winrate = (wins / decided * 100) if decided > 0 else 0
     
     async with aiosqlite.connect("edge_bot.db") as db:
         cursor = await db.execute("""
-            SELECT match_name, market, odds, result 
+            SELECT odds, result FROM signals WHERE result IN ('win', 'lose')
+        """)
+        results = await cursor.fetchall()
+        
+        profit = 0.0
+        for odds, result in results:
+            if result == "win":
+                profit += odds - 1
+            else:
+                profit -= 1
+        
+        cursor = await db.execute("""
+            SELECT match_name, market, odds, result, our_prob, edge
             FROM signals 
             ORDER BY created_at DESC 
-            LIMIT 10
+            LIMIT 8
         """)
         recent = await cursor.fetchall()
     
+    roi = (profit / decided * 100) if decided > 0 else 0
+    
     text = (
-        "📊 <b>Статистика бота</b>\n\n"
-        f"Всего: <b>{total}</b>\n"
-        f"✅ Побед: <b>{wins}</b>\n"
-        f"❌ Поражений: <b>{loses}</b>\n"
-        f"⏳ В ожидании: <b>{pending}</b>\n"
-        f"Winrate: <b>{winrate:.1f}%</b>\n\n"
-        "<b>Последние сигналы:</b>\n"
+        "📊 <b>Эффективность</b>\n\n"
+        f"Проходимость <b>{winrate:.0f}%</b> · сыграно <b>{decided}</b>\n"
+        f"✅ {wins}  ❌ {loses}  ⏳ {pending}\n"
+        f"Прибыль: <b>{profit:+.1f}</b> ед. · ROI: <b>{roi:+.1f}%</b>\n\n"
+        "<b>Последние результаты:</b>\n"
     )
     
-    for match, market, odds, result in recent:
-        if result == "win":
-            text += f"✅ {market} @ {odds:.2f} — {match}\n"
-        elif result == "lose":
-            text += f"❌ {market} @ {odds:.2f} — {match}\n"
-        else:
-            text += f"⏳ {market} @ {odds:.2f} — {match}\n"
+    for match, market, odds, result, prob, edge in recent:
+        icon = "✅" if result == "win" else "❌" if result == "lose" else "⏳"
+        text += f"\n{icon} {match}\n"
+        text += f"{market} @ {odds:.2f} · edge +{edge*100:.1f}%\n"
     
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
