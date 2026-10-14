@@ -9,7 +9,7 @@ from database import (
 from services.model import calculate_over_probability, calculate_edge
 from services.stats import get_team_stats
 
-MAX_SIGNALS_PER_DAY = 30
+MAX_SIGNALS_PER_DAY = 100
 ALLOWED_LINES = (1.5, 2.5,)
 
 async def get_odds():
