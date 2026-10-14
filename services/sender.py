@@ -40,8 +40,10 @@ async def get_scores_api_football():
     if not API_FOOTBALL_KEY:
         return []
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    from datetime import datetime
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     url = "https://v3.football.api-sports.io/fixtures"
-    params = {"date": "2026-10-13", "status": "FT"}
+    params = {"date": today, "status": "FT"}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, params=params) as resp:
@@ -155,8 +157,9 @@ async def check_and_send(bot):
                     )
                     edge = calculate_edge(our_prob, odds)
                     
-                    if edge < 0.02:
-                        continue
+                    # Фильтр по edge временно отключён
+                    # if edge < 0.02:
+                    #     continue
                     
                     market_name = f"ТБ {line}"
                     if await is_signal_sent(match_name, market_name):
