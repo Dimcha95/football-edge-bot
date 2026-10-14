@@ -155,7 +155,7 @@ async def check_and_send(bot):
                     )
                     edge = calculate_edge(our_prob, odds)
                     
-                    if edge < 0.05:
+                    if edge < 0.02:
                         continue
                     
                     market_name = f"ТБ {line}"
