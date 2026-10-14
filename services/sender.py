@@ -10,6 +10,7 @@ from services.model import calculate_over_probability, calculate_edge
 from services.stats import get_team_stats
 
 MAX_SIGNALS_PER_DAY = 30
+ALLOWED_LINES = (1.5, 2.5, 3.5)
 
 async def get_odds():
     """Получает коэффициенты на тоталы из API-Football"""
@@ -48,6 +49,8 @@ async def get_odds():
                                     if "Over" in value.get("value", ""):
                                         try:
                                             line = float(value["value"].replace("Over ", ""))
+                                            if line not in ALLOWED_LINES:
+                                                continue
                                             odds = float(value["odd"])
                                             matches.append({
                                                 "home_team": home,
@@ -188,6 +191,9 @@ async def check_and_send(bot):
                         continue
                     
                     line = outcome.get("point", 2.5)
+                    if line not in ALLOWED_LINES:
+                        continue
+                    
                     odds = outcome.get("price", 0)
                     
                     if odds < 1.30 or odds > 4.0:
@@ -203,7 +209,6 @@ async def check_and_send(bot):
                     )
                     edge = calculate_edge(our_prob, odds)
                     
-                    # Фильтр по edge (можно включить обратно)
                     # if edge < 0.02:
                     #     continue
                     
@@ -228,7 +233,7 @@ async def check_and_send(bot):
                     
                     await save_signal(match_name, league, market_name, odds, our_prob, edge)
                     sent += 1
-                    print(f"Отправлен: {match_name}")
+                    print(f"Отправлен: {match_name} {market_name}")
                     break
     
     print(f"Отправлено: {sent}")
