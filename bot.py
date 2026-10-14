@@ -182,15 +182,15 @@ async def today_summary(callback: types.CallbackQuery):
     
     for match, market, odds, result in signals:
         if result == "win":
-            text += f"✅ {market} @ {odds:.2f} — {match}\n"
+            text += f"✅ <b>{match}</b>\n{market} @ {odds:.2f}\n\n"
             profit += odds - 1
         elif result == "lose":
-            text += f"❌ {market} @ {odds:.2f} — {match}\n"
+            text += f"❌ <b>{match}</b>\n{market} @ {odds:.2f}\n\n"
             profit -= 1
         else:
-            text += f"⏳ {market} @ {odds:.2f} — {match}\n"
+            text += f"⏳ <b>{match}</b>\n{market} @ {odds:.2f}\n\n"
     
-    text += f"\n💰 Флэт за день: <b>{profit:+.2f}</b> ед."
+    text += f"💰 Флэт за день: <b>{profit:+.2f}</b> ед."
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
@@ -225,7 +225,7 @@ async def send_daily_summary():
 @dp.message(Command("today"))
 async def today_stats(message: types.Message):
     count = await get_today_signals_count()
-    await message.answer(f"📊 <b>Сигналов сегодня:</b> {count} / 30", parse_mode="HTML")
+    await message.answer(f"📊 <b>Сигналов сегодня:</b> {count} / 50", parse_mode="HTML")
 
 @dp.message(Command("result"))
 async def set_result(message: types.Message):
