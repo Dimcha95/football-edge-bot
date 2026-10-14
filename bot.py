@@ -267,7 +267,7 @@ async def on_startup():
     # Проверка сигналов с 8:00 до 23:59 каждые 15 минут
     scheduler.add_job(
         check_and_send, 
-        CronTrigger(hour="8-23", minute="*/10", timezone=moscow),
+        CronTrigger(hour="8-23", minute="*/15", timezone=moscow),
         args=[bot]
     )
     
