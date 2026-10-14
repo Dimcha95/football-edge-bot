@@ -1,5 +1,6 @@
 import aiohttp
 import aiosqlite
+from datetime import datetime, timedelta
 from config import ODDS_API_KEY, API_FOOTBALL_KEY
 from database import (
     get_users_for_signals, save_signal, is_signal_sent, 
@@ -11,18 +12,64 @@ from services.stats import get_team_stats
 MAX_SIGNALS_PER_DAY = 30
 
 async def get_odds():
-    url = "https://api.the-odds-api.com/v4/sports/soccer/odds"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "eu",
-        "markets": "totals",
-        "oddsFormat": "decimal"
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
-            if resp.status != 200:
-                return []
-            return await resp.json()
+    """Получает коэффициенты на тоталы из API-Football"""
+    if not API_FOOTBALL_KEY:
+        print("Нет ключа API-Football")
+        return []
+    
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    matches = []
+    timeout = aiohttp.ClientTimeout(total=10)
+    
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for date in [today, tomorrow]:
+                url = "https://v3.football.api-sports.io/odds"
+                params = {"date": date, "bet": 5}
+                async with session.get(url, headers=headers, params=params) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    
+                    for item in data.get("response", []):
+                        teams = item.get("teams", {})
+                        league = item.get("league", {})
+                        home = teams.get("home", {}).get("name", "")
+                        away = teams.get("away", {}).get("name", "")
+                        
+                        for bookmaker in item.get("bookmakers", []):
+                            for bet in bookmaker.get("bets", []):
+                                if bet.get("id") != 5:
+                                    continue
+                                for value in bet.get("values", []):
+                                    if "Over" in value.get("value", ""):
+                                        try:
+                                            line = float(value["value"].replace("Over ", ""))
+                                            odds = float(value["odd"])
+                                            matches.append({
+                                                "home_team": home,
+                                                "away_team": away,
+                                                "sport_title": league.get("name", ""),
+                                                "bookmakers": [{
+                                                    "markets": [{
+                                                        "key": "totals",
+                                                        "outcomes": [{
+                                                            "name": "Over",
+                                                            "point": line,
+                                                            "price": odds
+                                                        }]
+                                                    }]
+                                                }]
+                                            })
+                                        except:
+                                            continue
+        return matches
+    except Exception as e:
+        print(f"Ошибка API-Football: {e}")
+        return []
 
 async def get_scores_odds_api():
     url = "https://api.the-odds-api.com/v4/sports/soccer/scores"
@@ -40,7 +87,6 @@ async def get_scores_api_football():
     if not API_FOOTBALL_KEY:
         return []
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    from datetime import datetime
     today = datetime.utcnow().strftime("%Y-%m-%d")
     url = "https://v3.football.api-sports.io/fixtures"
     params = {"date": today, "status": "FT"}
@@ -157,7 +203,7 @@ async def check_and_send(bot):
                     )
                     edge = calculate_edge(our_prob, odds)
                     
-                    # Фильтр по edge временно отключён
+                    # Фильтр по edge (можно включить обратно)
                     # if edge < 0.02:
                     #     continue
                     
