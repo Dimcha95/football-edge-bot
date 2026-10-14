@@ -10,7 +10,7 @@ from services.model import calculate_over_probability, calculate_edge
 from services.stats import get_team_stats
 
 MAX_SIGNALS_PER_DAY = 30
-ALLOWED_LINES = (1.5, 2.5, 3.5)
+ALLOWED_LINES = (1.5, 2.5,)
 
 async def get_odds():
     """Получает коэффициенты на тоталы из The Odds API"""
