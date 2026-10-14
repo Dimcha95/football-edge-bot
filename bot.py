@@ -264,17 +264,23 @@ async def on_startup():
     await set_commands()
     scheduler = AsyncIOScheduler(timezone=moscow)
     
-    # Проверка сигналов с 8:00 до 23:59 каждые 15 минут
+    # Сигналы: с 8:00 до 23:59 каждые 15 минут
     scheduler.add_job(
         check_and_send, 
         CronTrigger(hour="8-23", minute="*/15", timezone=moscow),
         args=[bot]
     )
     
-    scheduler.add_job(update_results, "interval", minutes=15)
+    # Результаты: каждый час с 12:00 до 02:00
+    scheduler.add_job(
+        update_results,
+        CronTrigger(hour="12-23,0-2", minute=0, timezone=moscow)
+    )
+    
+    # Сводка в 23:59
     scheduler.add_job(send_daily_summary, CronTrigger(hour=23, minute=59, timezone=moscow))
     scheduler.start()
-    print("Планировщик запущен (Москва, каждые 15 мин)")
+    print("Планировщик запущен (сигналы каждые 15 мин, результаты каждый час 12:00-02:00)")
     print("Football Edge Bot запущен")
 
 async def main():
