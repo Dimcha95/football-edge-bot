@@ -1,7 +1,7 @@
 import aiohttp
 import aiosqlite
-from datetime import datetime, timedelta
-from config import ODDS_API_KEY, API_FOOTBALL_KEY
+from datetime import datetime
+from config import ODDS_API_KEY
 from database import (
     get_users_for_signals, save_signal, is_signal_sent, 
     get_today_signals_count, update_signal_result
@@ -13,100 +13,71 @@ MAX_SIGNALS_PER_DAY = 30
 ALLOWED_LINES = (1.5, 2.5, 3.5)
 
 async def get_odds():
-    """Получает коэффициенты на тоталы из API-Football"""
-    if not API_FOOTBALL_KEY:
-        print("Нет ключа API-Football")
-        return []
-    
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    matches = []
-    timeout = aiohttp.ClientTimeout(total=10)
-    
+    """Получает коэффициенты на тоталы из The Odds API"""
+    url = "https://api.the-odds-api.com/v4/sports/soccer/odds"
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "eu,uk,us",
+        "markets": "totals",
+        "oddsFormat": "decimal"
+    }
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for date in [today, tomorrow]:
-                url = "https://v3.football.api-sports.io/odds"
-                params = {"date": date, "bet": 5}
-                async with session.get(url, headers=headers, params=params) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    
-                    for item in data.get("response", []):
-                        teams = item.get("teams", {})
-                        league = item.get("league", {})
-                        home = teams.get("home", {}).get("name", "")
-                        away = teams.get("away", {}).get("name", "")
-                        
-                        for bookmaker in item.get("bookmakers", []):
-                            for bet in bookmaker.get("bets", []):
-                                if bet.get("id") != 5:
-                                    continue
-                                for value in bet.get("values", []):
-                                    if "Over" in value.get("value", ""):
-                                        try:
-                                            line = float(value["value"].replace("Over ", ""))
-                                            if line not in ALLOWED_LINES:
-                                                continue
-                                            odds = float(value["odd"])
-                                            matches.append({
-                                                "home_team": home,
-                                                "away_team": away,
-                                                "sport_title": league.get("name", ""),
-                                                "bookmakers": [{
-                                                    "markets": [{
-                                                        "key": "totals",
-                                                        "outcomes": [{
-                                                            "name": "Over",
-                                                            "point": line,
-                                                            "price": odds
-                                                        }]
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=15) as resp:
+                if resp.status != 200:
+                    print(f"The Odds API error: {resp.status}")
+                    return []
+                data = await resp.json()
+                matches = []
+                for match in data:
+                    home = match.get("home_team", "")
+                    away = match.get("away_team", "")
+                    league = match.get("sport_title", "")
+                    for bookmaker in match.get("bookmakers", []):
+                        for market in bookmaker.get("markets", []):
+                            if market.get("key") != "totals":
+                                continue
+                            for outcome in market.get("outcomes", []):
+                                if outcome.get("name") == "Over":
+                                    line = outcome.get("point")
+                                    odds = outcome.get("price")
+                                    if line in ALLOWED_LINES and odds:
+                                        matches.append({
+                                            "home_team": home,
+                                            "away_team": away,
+                                            "sport_title": league,
+                                            "bookmakers": [{
+                                                "markets": [{
+                                                    "key": "totals",
+                                                    "outcomes": [{
+                                                        "name": "Over",
+                                                        "point": line,
+                                                        "price": odds
                                                     }]
                                                 }]
-                                            })
-                                        except:
-                                            continue
-        return matches
+                                            }]
+                                        })
+                return matches
     except Exception as e:
-        print(f"Ошибка API-Football: {e}")
+        print(f"Ошибка The Odds API: {e}")
         return []
 
-async def get_scores_odds_api():
+async def get_scores():
     url = "https://api.the-odds-api.com/v4/sports/soccer/scores"
     params = {"apiKey": ODDS_API_KEY, "daysFrom": 1}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, timeout=10) as resp:
                 if resp.status != 200:
                     return []
                 return await resp.json()
     except:
         return []
 
-async def get_scores_api_football():
-    if not API_FOOTBALL_KEY:
-        return []
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    url = "https://v3.football.api-sports.io/fixtures"
-    params = {"date": today, "status": "FT"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return data.get("response", [])
-    except:
-        return []
-
 async def update_results():
     print("Обновляю результаты...")
-    odds_scores = await get_scores_odds_api()
-    for game in odds_scores:
+    scores = await get_scores()
+    for game in scores:
         if not game.get("completed"):
             continue
         home = game.get("home_team", "").lower()
@@ -119,17 +90,6 @@ async def update_results():
             elif name == away:
                 away_score = int(score.get("score", 0))
         total = home_score + away_score
-        await _update_matching_signals(home, away, total)
-    
-    football_scores = await get_scores_api_football()
-    for fixture in football_scores:
-        teams = fixture.get("teams", {})
-        home = teams.get("home", {}).get("name", "").lower()
-        away = teams.get("away", {}).get("name", "").lower()
-        goals = fixture.get("goals", {})
-        home_goals = goals.get("home", 0) or 0
-        away_goals = goals.get("away", 0) or 0
-        total = home_goals + away_goals
         await _update_matching_signals(home, away, total)
 
 async def _update_matching_signals(home: str, away: str, total_goals: int):
@@ -195,7 +155,6 @@ async def check_and_send(bot):
                         continue
                     
                     odds = outcome.get("price", 0)
-                    
                     if odds < 1.30 or odds > 4.0:
                         continue
                     
@@ -208,9 +167,6 @@ async def check_and_send(bot):
                         away_stats.get("xg", 1.3)
                     )
                     edge = calculate_edge(our_prob, odds)
-                    
-                    # if edge < 0.02:
-                    #     continue
                     
                     market_name = f"ТБ {line}"
                     if await is_signal_sent(match_name, market_name):
