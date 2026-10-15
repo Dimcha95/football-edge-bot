@@ -9,7 +9,7 @@ from aiohttp import web
 from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
 from database import (
     init_db, add_user, set_user_active, get_stats, get_users_count,
-    set_premium, get_user_status, get_today_signals_count
+    set_premium, get_user_status, get_today_signals_count, get_recent_results
 )
 from services.sender import check_and_send
 
@@ -50,7 +50,10 @@ async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     await set_user_active(message.from_user.id, True)
     status, days_left = await get_user_status(message.from_user.id)
-    status_text = "Премиум" if status == "premium" else f"Пробный период ({days_left} дн.)" if days_left is not None else "Пробный период"
+    if status == "premium":
+        status_text = "Премиум"
+    else:
+        status_text = f"Пробный период ({days_left} дн.)" if days_left is not None else "Пробный период"
     await message.answer(
         f"⚽️ <b>Football Edge Bot</b>\n\n"
         f"Бот автоматически ищет value-ставки на футбол.\n"
@@ -75,7 +78,29 @@ async def turn_off(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
     stats = await get_stats()
-    await callback.message.answer(f"📊 Статистика:\n{stats}")
+    results = await get_recent_results(15)
+
+    total = stats.get("total", 0)
+    wins = stats.get("wins", 0)
+    losses = stats.get("losses", 0)
+    pending = stats.get("pending", 0)
+    winrate = stats.get("winrate", 0)
+
+    text = (
+        f"📊 <b>Эффективность</b>\n"
+        f"Проходимость <b>{winrate:.0f}%</b> · сыграно {total}\n"
+        f"✅ {wins}  ❌ {losses}  ⏳ {pending}\n\n"
+        f"<b>Результаты:</b>\n"
+    )
+
+    if results:
+        for match_name, market, odds, edge, result in results:
+            icon = "✅" if result == "win" else "❌" if result == "loss" else "⏳"
+            text += f"{icon} {match_name}\n{market} @ {odds:.2f} · edge +{edge*100:.1f}%\n\n"
+    else:
+        text += "Пока нет сыгранных сигналов"
+
+    await callback.message.answer(text, parse_mode="HTML")
 
 @dp.callback_query(F.data == "today")
 async def show_today(callback: types.CallbackQuery):
