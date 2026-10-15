@@ -8,7 +8,7 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
-
+REGIONS = os.getenv("REGIONS", "eu")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 10))
 
 MIN_EDGE = float(os.getenv("MIN_EDGE", 0.03))
