@@ -53,21 +53,36 @@ async def set_premium(user_id: int, premium: bool):
         )
         await db.commit()
 
+async def get_users_count():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM users")
+        return (await cursor.fetchone())[0]
+
 async def get_users_for_signals():
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT user_id FROM users 
             WHERE is_active = 1 
-            AND (is_premium = 1 OR datetime(joined_at) > datetime('now', '-3 days'))
+            AND (is_premium = 1 OR julianday('now') - julianday(joined_at) <= 3)
         """)
         rows = await cursor.fetchall()
         return [r[0] for r in rows]
 
-async def get_active_users():
+async def get_user_status(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT user_id FROM users WHERE is_active = 1")
-        rows = await cursor.fetchall()
-        return [r[0] for r in rows]
+        cursor = await db.execute(
+            "SELECT is_premium, joined_at FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None, None
+        is_premium, joined_at = row
+        if is_premium:
+            return "premium", None
+        joined = datetime.fromisoformat(joined_at)
+        days_left = 3 - (datetime.utcnow() - joined).days
+        return "trial", max(0, days_left)
 
 async def save_signal(match_name, league, market, odds, our_prob, edge):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -77,47 +92,13 @@ async def save_signal(match_name, league, market, odds, our_prob, edge):
         """, (match_name, league, market, odds, our_prob, edge, datetime.utcnow().isoformat()))
         await db.commit()
 
-async def is_signal_sent(match_name: str, market: str) -> bool:
+async def is_signal_sent(match_name, market):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT id FROM signals WHERE match_name = ? AND market = ?",
+            "SELECT 1 FROM signals WHERE match_name = ? AND market = ?",
             (match_name, market)
         )
-        row = await cursor.fetchone()
-        return row is not None
-
-async def get_stats():
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT 
-                COUNT(*),
-                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN result = 'lose' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN result = 'pending' THEN 1 ELSE 0 END)
-            FROM signals
-        """)
-        row = await cursor.fetchone()
-        return row if row else (0, 0, 0, 0)
-
-async def get_users_count():
-    async with aiosqlite.connect(DB_PATH) as db:
-        total = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
-        active = (await (await db.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")).fetchone())[0]
-        premium = (await (await db.execute("SELECT COUNT(*) FROM users WHERE is_premium = 1")).fetchone())[0]
-        return total, active, premium
-
-async def get_stats_period(days: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        since = (datetime.utcnow() - timedelta(days=days)).isoformat()
-        cursor = await db.execute("""
-            SELECT 
-                COUNT(*),
-                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN result = 'lose' THEN 1 ELSE 0 END)
-            FROM signals WHERE created_at >= ?
-        """, (since,))
-        row = await cursor.fetchone()
-        return row if row else (0, 0, 0)
+        return await cursor.fetchone() is not None
 
 async def get_today_signals_count():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -128,21 +109,28 @@ async def get_today_signals_count():
         )
         return (await cursor.fetchone())[0]
 
-async def update_signal_result(match_name: str, market: str, result: str):
+async def update_signal_result(match_name, market, result):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE signals SET result = ? WHERE match_name = ? AND market = ? AND result = 'pending'",
+            "UPDATE signals SET result = ? WHERE match_name = ? AND market = ?",
             (result, match_name, market)
         )
         await db.commit()
 
-async def get_today_signals():
+async def get_stats():
     async with aiosqlite.connect(DB_PATH) as db:
-        today = datetime.utcnow().date().isoformat()
-        cursor = await db.execute("""
-            SELECT match_name, market, odds, result 
-            FROM signals 
-            WHERE date(created_at) = ?
-            ORDER BY created_at
-        """, (today,))
-        return await cursor.fetchall()
+        cursor = await db.execute("SELECT result FROM signals")
+        rows = await cursor.fetchall()
+        total = len(rows)
+        wins = sum(1 for r in rows if r[0] == "win")
+        losses = sum(1 for r in rows if r[0] == "lose")
+        pending = sum(1 for r in rows if r[0] == "pending")
+        finished = wins + losses
+        winrate = (wins / finished * 100) if finished > 0 else 0
+        return {
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "pending": pending,
+            "winrate": winrate
+        }
