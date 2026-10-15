@@ -13,7 +13,6 @@ MAX_SIGNALS_PER_DAY = 50
 ALLOWED_LINES = (1.5, 2.5)
 
 async def get_odds():
-    """Получает коэффициенты на тоталы из The Odds API"""
     url = "https://api.the-odds-api.com/v4/sports/soccer/odds"
     params = {
         "apiKey": ODDS_API_KEY,
@@ -63,19 +62,23 @@ async def get_odds():
         return []
 
 async def get_scores():
-    """Получает результаты по всем лигам"""
     leagues = [
-        "soccer_england_efl_cup", "soccer_england_league1", "soccer_england_league2",
-        "soccer_epl", "soccer_finland_veikkausliiga", "soccer_france_ligue_one",
-        "soccer_france_ligue_two", "soccer_germany_bundesliga", "soccer_germany_bundesliga2",
-        "soccer_germany_bundesliga_women", "soccer_germany_dfb_pokal", "soccer_germany_liga3",
-        "soccer_greece_super_league", "soccer_italy_serie_a", "soccer_italy_serie_b",
-        "soccer_japan_j_league", "soccer_korea_kleague1", "soccer_league_of_ireland",
-        "soccer_mexico_ligamx", "soccer_netherlands_eredivisie", "soccer_norway_eliteserien",
-        "soccer_poland_ekstraklasa", "soccer_portugal_primeira_liga", "soccer_saudi_arabia_pro_league",
-        "soccer_spain_la_liga", "soccer_spain_segunda_division", "soccer_spl",
-        "soccer_sweden_allsvenskan", "soccer_sweden_superettan", "soccer_switzerland_superleague",
-        "soccer_turkey_super_league", "soccer_uefa_champs_league", "soccer_uefa_europa_conference_league",
+        "soccer_argentina_primera_division", "soccer_australia_aleague",
+        "soccer_austria_bundesliga", "soccer_brazil_campeonato", "soccer_brazil_serie_b",
+        "soccer_chile_campeonato", "soccer_china_superleague",
+        "soccer_conmebol_copa_libertadores", "soccer_conmebol_copa_sudamericana",
+        "soccer_denmark_superliga", "soccer_efl_champ", "soccer_england_efl_cup",
+        "soccer_england_league1", "soccer_england_league2", "soccer_epl",
+        "soccer_finland_veikkausliiga", "soccer_france_ligue_one", "soccer_france_ligue_two",
+        "soccer_germany_bundesliga", "soccer_germany_bundesliga2", "soccer_germany_bundesliga_women",
+        "soccer_germany_dfb_pokal", "soccer_germany_liga3", "soccer_greece_super_league",
+        "soccer_italy_serie_a", "soccer_italy_serie_b", "soccer_japan_j_league",
+        "soccer_korea_kleague1", "soccer_league_of_ireland", "soccer_mexico_ligamx",
+        "soccer_netherlands_eredivisie", "soccer_norway_eliteserien", "soccer_poland_ekstraklasa",
+        "soccer_portugal_primeira_liga", "soccer_saudi_arabia_pro_league", "soccer_spain_la_liga",
+        "soccer_spain_segunda_division", "soccer_spl", "soccer_sweden_allsvenskan",
+        "soccer_sweden_superettan", "soccer_switzerland_superleague", "soccer_turkey_super_league",
+        "soccer_uefa_champs_league", "soccer_uefa_europa_conference_league",
         "soccer_uefa_europa_league", "soccer_uefa_nations_league", "soccer_usa_mls"
     ]
     all_scores = []
