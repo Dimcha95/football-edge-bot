@@ -1,7 +1,4 @@
 import asyncio
-import aiosqlite
-import pytz
-from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -9,26 +6,26 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from aiohttp import web
 
 from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
 from database import (
-    init_db, add_user, set_user_active, get_stats, get_users_count,
-    set_premium, get_today_signals_count, get_stats_period, get_today_signals,
-    update_signal_result, get_users_for_signals
+    init_db, add_user, set_user_active, get_stats, 
+    get_users_count, set_premium, get_user_status
 )
 from services.sender import check_and_send, update_results
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-moscow = pytz.timezone("Europe/Moscow")
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 async def set_commands():
     await bot.set_my_commands(
-        commands=[BotCommand(command="start", description="Запуск бота")],
+        commands=[
+            BotCommand(command="start", description="Запуск бота")
+        ],
         scope=BotCommandScopeDefault()
     )
     for admin_id in ADMIN_IDS:
@@ -36,10 +33,8 @@ async def set_commands():
             commands=[
                 BotCommand(command="start", description="Запуск бота"),
                 BotCommand(command="admin", description="Админ-панель"),
-                BotCommand(command="today", description="Сигналы за сегодня"),
                 BotCommand(command="premium", description="Выдать премиум"),
-                BotCommand(command="unpremium", description="Снять премиум"),
-                BotCommand(command="result", description="Обновить результат")
+                BotCommand(command="unpremium", description="Снять премиум")
             ],
             scope=BotCommandScopeChat(chat_id=admin_id)
         )
@@ -47,221 +42,68 @@ async def set_commands():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
+    
+    status, days_left = await get_user_status(message.from_user.id)
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Включить сигналы", callback_data="signals_on")],
-        [InlineKeyboardButton(text="❌ Выключить", callback_data="signals_off")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="stats_periods")],
-        [InlineKeyboardButton(text="📅 Сводка за сегодня", callback_data="today_summary")]
+        [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="period_stats")],
+        [InlineKeyboardButton(text="💎 Мой статус", callback_data="my_status")],
+        [InlineKeyboardButton(text="❓ Как получить премиум", callback_data="premium_info")]
     ])
-    await message.answer(
-        "⚽️ <b>Football Edge Bot</b>\n\n"
-        "Бот автоматически ищет value-ставки на футбол.\n\n"
-        "Нажми кнопку, чтобы начать.",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-
-@dp.callback_query(F.data == "signals_on")
-async def signals_on(callback: types.CallbackQuery):
-    await set_user_active(callback.from_user.id, True)
-    await callback.answer("Сигналы включены")
-    await callback.message.answer("✅ Теперь ты будешь получать сигналы.")
-
-@dp.callback_query(F.data == "signals_off")
-async def signals_off(callback: types.CallbackQuery):
-    await set_user_active(callback.from_user.id, False)
-    await callback.answer("Сигналы выключены")
-    await callback.message.answer("⏸ Рассылка остановлена.")
+    
+    text = "⚽️ Football Edge Bot\n\n"
+    if status == "premium":
+        text += "✅ У вас Premium"
+    elif status == "trial":
+        text += f"🆓 Пробный период: осталось {days_left} дн."
+    else:
+        text += "❌ Пробный период закончился"
+    
+    await message.answer(text, reply_markup=kb)
 
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
-    await show_stats_page(callback, page=0)
-
-async def show_stats_page(callback: types.CallbackQuery, page: int = 0):
-    total, wins, loses, pending = await get_stats()
-    decided = wins + loses
-    winrate = (wins / decided * 100) if decided > 0 else 0
-    
-    async with aiosqlite.connect("edge_bot.db") as db:
-        cursor = await db.execute("""
-            SELECT odds, result FROM signals WHERE result IN ('win', 'lose')
-        """)
-        results = await cursor.fetchall()
-        
-        profit = 0.0
-        for odds, result in results:
-            if result == "win":
-                profit += odds - 1
-            else:
-                profit -= 1
-        
-        cursor = await db.execute("""
-            SELECT match_name, market, odds, result, our_prob, edge, created_at
-            FROM signals 
-            ORDER BY created_at DESC
-        """)
-        all_recent = await cursor.fetchall()
-    
-    roi = (profit / decided * 100) if decided > 0 else 0
-    per_page = 5
-    start = page * per_page
-    end = start + per_page
-    recent = all_recent[start:end]
-    
+    stats = await get_stats()
     text = (
-        "📊 <b>Эффективность</b>\n\n"
-        f"Проходимость <b>{winrate:.0f}%</b> · сыграно <b>{decided}</b>\n"
-        f"✅ {wins}  ❌ {loses}  ⏳ {pending}\n"
-        f"Прибыль: <b>{profit:+.1f}</b> ед. · ROI: <b>{roi:+.1f}%</b>\n\n"
-        f"<b>Результаты (стр. {page+1}):</b>\n"
+        f"📊 <b>Статистика</b>\n\n"
+        f"Всего сигналов: {stats['total']}\n"
+        f"✅ Выигрыши: {stats['wins']}\n"
+        f"❌ Проигрыши: {stats['losses']}\n"
+        f"⏳ В ожидании: {stats['pending']}\n"
+        f"Проходимость: {stats['winrate']:.1f}%"
     )
-    
-    for match, market, odds, result, prob, edge, created_at in recent:
-        icon = "✅" if result == "win" else "❌" if result == "lose" else "⏳"
-        try:
-            date = datetime.fromisoformat(created_at).strftime("%d.%m")
-        except:
-            date = "—"
-        text += f"\n{icon} {match}\n{market} @ {odds:.2f} · {date} · edge +{edge*100:.1f}%\n"
-    
-    buttons = []
-    if page > 0:
-        buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"stats_page_{page-1}"))
-    if end < len(all_recent):
-        buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"stats_page_{page+1}"))
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
-    
-    try:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    except:
-        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text(text, parse_mode="HTML")
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("stats_page_"))
-async def stats_page(callback: types.CallbackQuery):
-    page = int(callback.data.split("_")[-1])
-    await show_stats_page(callback, page)
-
-@dp.callback_query(F.data == "stats_periods")
-async def stats_periods(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="7 дней", callback_data="period_7")],
-        [InlineKeyboardButton(text="14 дней", callback_data="period_14")],
-        [InlineKeyboardButton(text="30 дней", callback_data="period_30")]
-    ])
-    await callback.message.answer("📅 Выбери период:", reply_markup=kb)
+@dp.callback_query(F.data == "my_status")
+async def my_status(callback: types.CallbackQuery):
+    status, days_left = await get_user_status(callback.from_user.id)
+    if status == "premium":
+        text = "✅ У вас активен Premium"
+    elif status == "trial":
+        text = f"🆓 Пробный период\nОсталось дней: {days_left}"
+    else:
+        text = "❌ Пробный период закончился\nНужен Premium"
+    await callback.message.answer(text)
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("period_"))
-async def show_period_stats(callback: types.CallbackQuery):
-    days = int(callback.data.split("_")[1])
-    total, wins, loses = await get_stats_period(days)
-    winrate = (wins / (wins + loses) * 100) if (wins + loses) > 0 else 0
+@dp.callback_query(F.data == "premium_info")
+async def premium_info(callback: types.CallbackQuery):
     text = (
-        f"📊 <b>Статистика за {days} дней</b>\n\n"
-        f"Всего: <b>{total}</b>\n"
-        f"✅ Побед: <b>{wins}</b>\n"
-        f"❌ Поражений: <b>{loses}</b>\n"
-        f"Winrate: <b>{winrate:.1f}%</b>"
+        "💎 <b>Как получить Premium</b>\n\n"
+        "Premium даёт доступ к сигналам после пробного периода.\n\n"
+        "Для получения напишите администратору."
     )
     await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
-
-@dp.callback_query(F.data == "today_summary")
-async def today_summary(callback: types.CallbackQuery):
-    signals = await get_today_signals()
-    if not signals:
-        await callback.message.answer("Сегодня сигналов ещё не было.")
-        await callback.answer()
-        return
-    
-    text = "📊 <b>Сводка за сегодня</b>\n\n"
-    profit = 0.0
-    
-    for match, market, odds, result in signals:
-        if result == "win":
-            text += f"✅ <b>{match}</b>\n{market} @ {odds:.2f}\n\n"
-            profit += odds - 1
-        elif result == "lose":
-            text += f"❌ <b>{match}</b>\n{market} @ {odds:.2f}\n\n"
-            profit -= 1
-        else:
-            text += f"⏳ <b>{match}</b>\n{market} @ {odds:.2f}\n\n"
-    
-    text += f"💰 Флэт за день: <b>{profit:+.2f}</b> ед."
-    await callback.message.answer(text, parse_mode="HTML")
-    await callback.answer()
-
-async def send_daily_summary():
-    signals = await get_today_signals()
-    if not signals:
-        return
-    
-    text = "📊 <b>Сводка за сегодня</b>\n\n"
-    profit = 0.0
-    
-    for match, market, odds, result in signals:
-        if result == "win":
-            text += f"✅ {market} @ {odds:.2f} — {match}\n"
-            profit += odds - 1
-        elif result == "lose":
-            text += f"❌ {market} @ {odds:.2f} — {match}\n"
-            profit -= 1
-        else:
-            text += f"⏳ {market} @ {odds:.2f} — {match}\n"
-    
-    text += f"\n💰 Флэт за день: <b>{profit:+.2f}</b> ед."
-    
-    users = await get_users_for_signals()
-    for user_id in users:
-        try:
-            await bot.send_message(user_id, text, parse_mode="HTML")
-        except:
-            pass
-    print("Сводка за день отправлена")
-
-@dp.message(Command("today"))
-async def today_stats(message: types.Message):
-    count = await get_today_signals_count()
-    await message.answer(f"📊 <b>Сигналов сегодня:</b> {count} / 50", parse_mode="HTML")
-
-@dp.message(Command("result"))
-async def set_result(message: types.Message):
-    if not is_admin(message.from_user.id):
-        return
-    try:
-        parts = message.text.split("|")
-        if len(parts) != 3:
-            await message.answer("Формат: /result Матч|ТБ 2.5|win")
-            return
-        match_name = parts[0].replace("/result ", "").strip()
-        market = parts[1].strip()
-        result = parts[2].strip().lower()
-        if result not in ("win", "lose"):
-            await message.answer("Результат должен быть win или lose")
-            return
-        await update_signal_result(match_name, market, result)
-        await message.answer(f"✅ Результат обновлён:\n{match_name}\n{market} → {result}")
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
 
 @dp.message(Command("admin"))
-async def admin_cmd(message: types.Message):
+async def cmd_admin(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    total, active, premium = await get_users_count()
-    total_s, wins, loses, pending = await get_stats()
-    text = (
-        "🛠 <b>Админ-панель</b>\n\n"
-        f"👥 Пользователи: {total}\n"
-        f"🟢 Активных: {active}\n"
-        f"⭐ Premium: {premium}\n\n"
-        f"📊 Сигналов: {total_s}\n"
-        f"✅ {wins} | ❌ {loses} | ⏳ {pending}"
-    )
-    await message.answer(text, parse_mode="HTML")
+    count = await get_users_count()
+    await message.answer(f"👥 Пользователей: {count}")
 
 @dp.message(Command("premium"))
 async def give_premium(message: types.Message):
@@ -288,27 +130,28 @@ async def remove_premium(message: types.Message):
 async def on_startup():
     await init_db()
     await set_commands()
-    scheduler = AsyncIOScheduler(timezone=moscow)
-    
-    scheduler.add_job(
-        check_and_send, 
-        CronTrigger(hour="8-23", minute="*/15", timezone=moscow),
-        args=[bot]
-    )
-    
-    scheduler.add_job(
-        update_results,
-        CronTrigger(hour="12-23,0-2", minute=0, timezone=moscow)
-    )
-    
-    scheduler.add_job(send_daily_summary, CronTrigger(hour=23, minute=59, timezone=moscow))
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL, args=[bot])
+    scheduler.add_job(update_results, "interval", minutes=15)
     scheduler.start()
-    print("Планировщик запущен (сигналы каждые 15 мин, результаты каждый час 12:00-02:00)")
     print("Football Edge Bot запущен")
+
+async def health_check(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    await site.start()
+    print("Web server started on port 10000")
 
 async def main():
     await on_startup()
-    await asyncio.sleep(2)
+    await start_web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
