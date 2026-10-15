@@ -47,7 +47,7 @@ async def cmd_start(message: types.Message):
     status, days_left = await get_user_status(message.from_user.id)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats_0")],
         [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="period_stats")],
         [InlineKeyboardButton(text="💎 Мой статус", callback_data="my_status")],
         [InlineKeyboardButton(text="❓ Как получить премиум", callback_data="premium_info")]
@@ -63,31 +63,46 @@ async def cmd_start(message: types.Message):
     
     await message.answer(text, reply_markup=kb)
 
-@dp.callback_query(F.data == "stats")
+@dp.callback_query(F.data.startswith("stats"))
 async def show_stats(callback: types.CallbackQuery):
+    data = callback.data.split("_")
+    page = int(data[1]) if len(data) > 1 else 0
+    per_page = 5
+    
     stats = await get_stats()
     
     async with aiosqlite.connect("edge_bot.db") as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM signals")
+        total_signals = (await cursor.fetchone())[0]
+        
         cursor = await db.execute("""
             SELECT match_name, market, odds, edge, result 
             FROM signals 
             ORDER BY created_at DESC 
-            LIMIT 10
-        """)
+            LIMIT ? OFFSET ?
+        """, (per_page, page * per_page))
         signals = await cursor.fetchall()
     
     text = (
         f"📊 <b>Эффективность</b>\n"
         f"Проходимость {stats['winrate']:.0f}% · сыграно {stats['wins'] + stats['losses']}\n"
         f"✅ {stats['wins']}  ❌ {stats['losses']}  ⏳ {stats['pending']}\n\n"
-        f"<b>Результаты:</b>\n"
+        f"<b>Результаты (стр. {page + 1}):</b>\n"
     )
     
     for match_name, market, odds, edge, result in signals:
         icon = "⏳" if result == "pending" else ("✅" if result == "win" else "❌")
         text += f"{icon} {match_name}\n{market} @ {odds:.2f} · edge +{edge*100:.1f}%\n\n"
     
-    await callback.message.edit_text(text, parse_mode="HTML")
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"stats_{page-1}"))
+    if (page + 1) * per_page < total_signals:
+        buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"stats_{page+1}"))
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+    
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "my_status")
