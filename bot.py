@@ -1,4 +1,5 @@
 import asyncio
+import aiosqlite
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -65,14 +66,33 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
     stats = await get_stats()
+    
+    async with aiosqlite.connect("edge_bot.db") as db:
+        cursor = await db.execute("""
+            SELECT match_name, market, odds, edge, result 
+            FROM signals 
+            ORDER BY created_at DESC 
+            LIMIT 15
+        """)
+        signals = await cursor.fetchall()
+    
     text = (
         f"📊 <b>Статистика</b>\n\n"
         f"Всего сигналов: {stats['total']}\n"
         f"✅ Выигрыши: {stats['wins']}\n"
         f"❌ Проигрыши: {stats['losses']}\n"
         f"⏳ В ожидании: {stats['pending']}\n"
-        f"Проходимость: {stats['winrate']:.1f}%"
+        f"Проходимость: {stats['winrate']:.1f}%\n\n"
+        f"<b>Последние сигналы:</b>\n"
     )
+    
+    for match_name, market, odds, edge, result in signals:
+        icon = "⏳" if result == "pending" else ("✅" if result == "win" else "❌")
+        text += f"{icon} {match_name}\n{market} @ {odds:.2f} · edge +{edge*100:.1f}%\n\n"
+    
+    if len(text) > 4000:
+        text = text[:4000] + "..."
+    
     await callback.message.edit_text(text, parse_mode="HTML")
     await callback.answer()
 
