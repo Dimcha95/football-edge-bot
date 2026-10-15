@@ -178,7 +178,7 @@ async def check_and_send(bot):
                         continue
                     
                     odds = outcome.get("price", 0)
-                    if odds < 1.30 or odds > 4.0:
+                    if odds < 1.60 or odds > 4.0:
                         continue
                     
                     our_prob = calculate_over_probability(
