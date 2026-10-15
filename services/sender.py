@@ -1,4 +1,6 @@
 
+import logging
+
 from config import MIN_EDGE, MIN_PROBABILITY, MAX_SIGNALS_PER_DAY
 from database import (
     get_active_users,
@@ -10,6 +12,8 @@ from database import (
 from services.odds import get_odds
 from services.model import calculate_edge
 
+logger = logging.getLogger(__name__)
+
 
 def estimate_probability(
     line: float,
@@ -17,8 +21,8 @@ def estimate_probability(
     away_strength: float = 1.4,
 ) -> float:
     """
-    Начальная эвристическая оценка.
-    Не является обученной статистической моделью.
+    Предварительная эвристическая оценка вероятности.
+    Не является обученной моделью и не гарантирует результат.
     """
     expected_total = (home_strength + away_strength) / 2
 
@@ -36,58 +40,73 @@ def estimate_probability(
     return max(0.15, min(0.85, base))
 
 
-async def check_and_send(bot):
-    print("=== check_and_send вызван ===")
-
-    matches = await get_odds()
-    print(f"Вариантов коэффициентов: {len(matches)}")
-
-    today_count = await get_today_signals_count()
-
-    if today_count >= MAX_SIGNALS_PER_DAY:
-        print(f"Достигнут дневной лимит: {MAX_SIGNALS_PER_DAY}")
-        return
-
+async def get_eligible_users():
+    """Возвращает активных пользователей с действующим доступом."""
     active_users = await get_active_users()
-
-    if not active_users:
-        print("Нет активных пользователей")
-        return
-
-    # Оставляем только Premium и пользователей с действующим trial.
-    users = []
+    eligible_users = []
 
     for user_id in active_users:
         try:
             status, days_left = await get_user_status(user_id)
 
-            if status == "premium" or (
-                status == "trial" and days_left is not None and days_left > 0
+            if status == "premium":
+                eligible_users.append(user_id)
+            elif (
+                status == "trial"
+                and days_left is not None
+                and days_left > 0
             ):
-                users.append(user_id)
-        except Exception as exc:
-            print(f"Не удалось проверить статус {user_id}: {exc}")
+                eligible_users.append(user_id)
 
-    if not users:
-        print("Нет пользователей с действующим доступом")
+        except Exception:
+            logger.exception(
+                "Не удалось проверить доступ пользователя %s",
+                user_id,
+            )
+
+    return eligible_users
+
+
+async def check_and_send(bot):
+    logger.info("Запущена проверка коэффициентов")
+
+    matches = await get_odds()
+    logger.info("Получено вариантов коэффициентов: %s", len(matches))
+
+    today_count = await get_today_signals_count()
+
+    if today_count >= MAX_SIGNALS_PER_DAY:
+        logger.info("Достигнут дневной лимит: %s", MAX_SIGNALS_PER_DAY)
         return
 
-    sent = 0
+    users = await get_eligible_users()
+
+    if not users:
+        logger.info("Нет пользователей с действующим доступом")
+        return
+
+    new_signals = 0
 
     for match in matches:
-        fixture_id = match.get("fixture_id")
-        home = match.get("home", "")
-        away = match.get("away", "")
+        if today_count + new_signals >= MAX_SIGNALS_PER_DAY:
+            logger.info("Достигнут дневной лимит сигналов")
+            break
+
+        event_id = match.get("event_id")
+        home = match.get("home")
+        away = match.get("away")
         league = match.get("league", "Футбол")
         commence_time = match.get("commence_time")
+        fixture_id = match.get("fixture_id")
 
         try:
             line = float(match["line"])
             odds = float(match["odds"])
         except (KeyError, TypeError, ValueError):
+            logger.warning("Пропущен матч с некорректными коэффициентами")
             continue
 
-        if not fixture_id or not home or not away or odds <= 1:
+        if not event_id or not home or not away or odds <= 1:
             continue
 
         match_name = f"{home} — {away}"
@@ -96,7 +115,7 @@ async def check_and_send(bot):
         if await is_signal_sent(
             match_name,
             market_name,
-            event_id=str(fixture_id),
+            event_id=str(event_id),
         ):
             continue
 
@@ -110,10 +129,6 @@ async def check_and_send(bot):
         if probability < MIN_PROBABILITY or edge < MIN_EDGE:
             continue
 
-        if today_count + sent >= MAX_SIGNALS_PER_DAY:
-            print("Достигнут дневной лимит сигналов")
-            break
-
         text = (
             f"⚽️ <b>{match_name}</b>\n"
             f"🏆 {league}\n"
@@ -121,23 +136,28 @@ async def check_and_send(bot):
             f"🎯 <b>{market_name}</b> @ {odds:.2f}\n"
             f"📊 Оценка вероятности: <b>{probability * 100:.1f}%</b>\n"
             f"📈 Расчётный edge: <b>{edge * 100:+.1f}%</b>\n\n"
-            f"ℹ️ Вероятность — предварительная оценка, "
-            f"не гарантия результата."
+            "ℹ️ Вероятность предварительная, "
+            "это не гарантия результата."
         )
 
-        saved = await save_signal(
-            match_name=match_name,
-            league=league,
-            market=market_name,
-            odds=odds,
-            our_prob=probability,
-            edge=edge,
-            event_id=str(fixture_id),
-            fixture_id=int(fixture_id),
-            commence_time=commence_time,
-        )
+        try:
+            saved = await save_signal(
+                match_name=match_name,
+                league=league,
+                market=market_name,
+                odds=odds,
+                our_prob=probability,
+                edge=edge,
+                event_id=str(event_id),
+                fixture_id=int(fixture_id) if fixture_id is not None else None,
+                commence_time=commence_time,
+            )
+        except Exception:
+            logger.exception("Не удалось сохранить сигнал: %s", match_name)
+            continue
 
         if not saved:
+            logger.info("Дубликат сигнала пропущен: %s", match_name)
             continue
 
         delivered = 0
@@ -150,14 +170,20 @@ async def check_and_send(bot):
                     parse_mode="HTML",
                 )
                 delivered += 1
-            except Exception as exc:
-                print(f"Не удалось отправить сообщение {user_id}: {exc}")
+            except Exception:
+                logger.exception(
+                    "Не удалось отправить сигнал пользователю %s",
+                    user_id,
+                )
 
-        sent += 1
+        new_signals += 1
 
-        print(
-            f"Сигнал сохранён: {match_name}, {market_name}; "
-            f"доставлено пользователям: {delivered}"
+        logger.info(
+            "Сигнал сохранён: %s, %s; доставлено: %s из %s",
+            match_name,
+            market_name,
+            delivered,
+            len(users),
         )
 
-    print(f"Новых сигналов: {sent}")
+    logger.info("Новых сигналов за проверку: %s", new_signals)
