@@ -49,8 +49,13 @@ async def set_commands():
 async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     await set_user_active(message.from_user.id, True)
+    status, days_left = await get_user_status(message.from_user.id)
+    status_text = "Премиум" if status == "premium" else f"Пробный период ({days_left} дн.)" if days_left is not None else "Пробный период"
     await message.answer(
-        "⚽️ <b>Football Edge Bot</b>\n\nБот автоматически ищет value-ставки на футбол.\n\nНажми кнопку, чтобы начать.",
+        f"⚽️ <b>Football Edge Bot</b>\n\n"
+        f"Бот автоматически ищет value-ставки на футбол.\n"
+        f"Статус: {status_text}\n\n"
+        f"Нажми кнопку, чтобы начать.",
         reply_markup=main_keyboard(),
         parse_mode="HTML"
     )
@@ -79,7 +84,7 @@ async def show_today(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "periods")
 async def show_periods(callback: types.CallbackQuery):
-    await callback.message.answer("Статистика по периодам пока в разработке")
+    await callback.message.answer("📅 Статистика по периодам пока в разработке")
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -97,9 +102,9 @@ async def give_premium(message: types.Message):
     try:
         uid = int(message.text.split()[1])
         await set_premium(uid, True)
-        await message.answer(f"Premium → {uid}")
+        await message.answer(f"✅ Premium выдан {uid}")
     except:
-        await message.answer("/premium ID")
+        await message.answer("Использование: /premium 123456789")
 
 @dp.message(Command("unpremium"))
 async def remove_premium(message: types.Message):
@@ -110,14 +115,14 @@ async def remove_premium(message: types.Message):
         await set_premium(uid, False)
         await message.answer(f"Premium снят с {uid}")
     except:
-        await message.answer("/unpremium ID")
+        await message.answer("Использование: /unpremium 123456789")
 
 @dp.message(Command("today"))
 async def cmd_today(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     count = await get_today_signals_count()
-    await message.answer(f"Today signals: {count}")
+    await message.answer(f"Signals today: {count}")
 
 async def on_startup():
     await init_db()
