@@ -47,6 +47,8 @@ async def cmd_start(message: types.Message):
     status, days_left = await get_user_status(message.from_user.id)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔔 Включить сигналы", callback_data="enable")],
+        [InlineKeyboardButton(text="🔕 Выключить сигналы", callback_data="disable")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats_0")],
         [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="period_stats")],
         [InlineKeyboardButton(text="💎 Мой статус", callback_data="my_status")],
@@ -62,6 +64,18 @@ async def cmd_start(message: types.Message):
         text += "❌ Пробный период закончился"
     
     await message.answer(text, reply_markup=kb)
+
+@dp.callback_query(F.data == "enable")
+async def enable_signals(callback: types.CallbackQuery):
+    await set_user_active(callback.from_user.id, True)
+    await callback.answer("Сигналы включены")
+    await callback.message.answer("✅ Сигналы включены")
+
+@dp.callback_query(F.data == "disable")
+async def disable_signals(callback: types.CallbackQuery):
+    await set_user_active(callback.from_user.id, False)
+    await callback.answer("Сигналы выключены")
+    await callback.message.answer("🔕 Сигналы выключены")
 
 @dp.callback_query(F.data.startswith("stats"))
 async def show_stats(callback: types.CallbackQuery):
