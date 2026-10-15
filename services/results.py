@@ -1,92 +1,150 @@
+```python
+from datetime import datetime, timedelta, timezone
+
 import aiohttp
-import os
-from datetime import datetime, timedelta
-from database import get_pending_signals_with_time, update_signal_result
 
-API_KEY = os.getenv("API_FOOTBALL_KEY")
-BASE_URL = "https://v3.football.api-sports.io"
+from config import API_FOOTBALL_KEY
+from database import (
+    get_pending_signals_with_time,
+    update_signal_result,
+    get_api_cache,
+    set_api_cache,
+)
 
-async def search_match(home: str, away: str, date: str):
-    """Ищет матч по названиям команд и дате"""
-    if not API_KEY:
+API_BASE = "https://v3.football.api-sports.io"
+CACHE_TTL = 15 * 60
+FINAL_STATUSES = {"FT", "AET", "PEN"}
+
+
+async def api_get(endpoint: str, params: dict, ttl: int = CACHE_TTL):
+    if not API_FOOTBALL_KEY:
+        print("API_FOOTBALL_KEY не задан")
         return None
 
-    headers = {"x-apisports-key": API_KEY}
-    params = {
-        "date": date,
-        "timezone": "UTC"
-    }
+    cache_key = f"results:{endpoint}:{sorted(params.items())}"
+    cached = await get_api_cache(cache_key)
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{BASE_URL}/fixtures", headers=headers, params=params) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            
-            for fixture in data.get("response", []):
-                teams = fixture.get("teams", {})
-                home_name = teams.get("home", {}).get("name", "").lower()
-                away_name = teams.get("away", {}).get("name", "").lower()
-                
-                if home.lower() in home_name or home_name in home.lower():
-                    if away.lower() in away_name or away_name in away.lower():
-                        return fixture
+    if cached is not None:
+        return cached
+
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    try:
+        async with aiohttp.ClientSession(
+            headers=headers,
+            timeout=timeout,
+        ) as session:
+            async with session.get(
+                f"{API_BASE}/{endpoint.lstrip('/')}",
+                params=params,
+            ) as response:
+                if response.status != 200:
+                    print(f"API-Football HTTP {response.status}")
+                    return None
+
+                data = await response.json()
+
+                if data.get("errors"):
+                    print(f"API-Football errors: {data['errors']}")
+                    return None
+
+                await set_api_cache(cache_key, data, ttl)
+                return data
+
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        print(f"Ошибка запроса результатов: {exc}")
+        return None
+
+
+def normalize_name(name: str) -> str:
+    return "".join(ch.lower() for ch in name if ch.isalnum())
+
+
+def parse_total_line(market: str):
+    text = market.lower().replace(",", ".")
+
+    for prefix in ("тб", "over_"):
+        if prefix in text:
+            tail = text.split(prefix, 1)[1].strip()
+            try:
+                return float(tail.replace("_", " "))
+            except ValueError:
+                pass
+
+    if "over" in text:
+        tail = text.split("over", 1)[1].strip()
+        try:
+            return float(tail.replace("_", " "))
+        except ValueError:
+            pass
+
+    return None
+
+
+def calculate_result(market: str, total_goals: int):
+    line = parse_total_line(market)
+
+    if line is None:
+        return None
+
+    if total_goals > line:
+        return "win"
+    if total_goals < line:
+        return "loss"
+    return "push"
+
+
+async def find_fixture(home: str, away: str, commence_time: str = None):
+    if commence_time:
+        try:
+            start = datetime.fromisoformat(
+                commence_time.replace("Z", "+00:00")
+            )
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            match_date = start.astimezone(timezone.utc).date()
+        except ValueError:
+            match_date = datetime.now(timezone.utc).date()
+    else:
+        match_date = datetime.now(timezone.utc).date()
+
+    # Проверяем день матча и соседние даты на случай часового пояса.
+    for offset in (-1, 0, 1):
+        date = (match_date + timedelta(days=offset)).isoformat()
+
+        data = await api_get(
+            "fixtures",
+            {"date": date, "timezone": "UTC"},
+        )
+
+        if not data:
+            continue
+
+        for fixture in data.get("response", []):
+            teams = fixture.get("teams") or {}
+            api_home = (teams.get("home") or {}).get("name", "")
+            api_away = (teams.get("away") or {}).get("name", "")
+
+            # Сопоставляем только полные нормализованные названия.
+            if (
+                normalize_name(home) == normalize_name(api_home)
+                and normalize_name(away) == normalize_name(api_away)
+            ):
+                return fixture
+
     return None
 
 
 async def check_results(bot):
-    if not API_KEY:
-        print("API_FOOTBALL_KEY не задан")
-        return
-
     signals = await get_pending_signals_with_time()
+
     if not signals:
+        print("Нет сигналов для проверки")
         return
 
-    print(f"Проверяю {len(signals)} сигналов...")
+    print(f"Проверяю результатов: {len(signals)}")
     updated = 0
 
     for signal in signals:
-        signal_id, match_name, market, created_at = signal
-        
-        try:
-            # Разбираем название матча
-            if " - " not in match_name:
-                continue
-            home, away = match_name.split(" - ", 1)
-            
-            # Дата матча
-            match_date = created_at[:10]
-            
-            fixture = await search_match(home.strip(), away.strip(), match_date)
-            if not fixture:
-                continue
-
-            # Проверяем, закончился ли матч
-            status = fixture.get("fixture", {}).get("status", {}).get("short")
-            if status not in ("FT", "AET", "PEN"):
-                continue
-
-            goals = fixture.get("goals", {})
-            home_goals = goals.get("home", 0) or 0
-            away_goals = goals.get("away", 0) or 0
-            total_goals = home_goals + away_goals
-
-            # Определяем результат для тоталов
-            result = None
-            if "ТБ 1.5" in market or "over_15" in market.lower():
-                result = "win" if total_goals > 1.5 else "lose"
-            elif "ТБ 2.5" in market or "over_25" in market.lower():
-                result = "win" if total_goals > 2.5 else "lose"
-            elif "ТБ 3.5" in market or "over_35" in market.lower():
-                result = "win" if total_goals > 3.5 else "lose"
-
-            if result:
-                await update_signal_result(signal_id, result)
-                updated += 1
-                print(f"Сигнал {signal_id}: {result} ({total_goals} голов)")
-
-        except Exception as e:
-            print(f"Ошибка при проверке сигнала {signal_id}: {e}")
-
-    print(f"Обновлено результатов: {updated}")
+       
