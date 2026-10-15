@@ -1,8 +1,11 @@
-```python
+
 import aiosqlite
+import json
 from datetime import datetime, timedelta
 
 DB_PATH = "edge_bot.db"
+
+TRIAL_DAYS = 3
 
 
 async def init_db():
@@ -31,7 +34,6 @@ async def init_db():
             )
         """)
 
-        # Добавляем новые поля, не удаляя старые записи.
         cursor = await db.execute("PRAGMA table_info(signals)")
         columns = {row[1] for row in await cursor.fetchall()}
 
@@ -68,14 +70,11 @@ async def init_db():
 
 async def add_user(user_id: int, username: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
+        await db.execute("""
             INSERT OR IGNORE INTO users
                 (user_id, username, joined_at)
             VALUES (?, ?, ?)
-            """,
-            (user_id, username, datetime.utcnow().isoformat()),
-        )
+        """, (user_id, username, datetime.utcnow().isoformat()))
         await db.commit()
 
 
@@ -117,26 +116,14 @@ async def save_signal(
     commence_time: str = None,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
-        if event_id is not None:
-            cursor = await db.execute(
-                """
-                SELECT id FROM signals
-                WHERE event_id = ? AND market = ?
-                """,
-                (str(event_id), market),
-            )
-            if await cursor.fetchone():
-                return False
-
-        await db.execute(
-            """
-            INSERT INTO signals (
-                match_name, league, market, odds, our_prob, edge,
-                result, created_at, event_id, fixture_id, commence_time
-            )
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-            """,
-            (
+        try:
+            await db.execute("""
+                INSERT INTO signals (
+                    match_name, league, market, odds, our_prob, edge,
+                    result, created_at, event_id, fixture_id, commence_time
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+            """, (
                 match_name,
                 league,
                 market,
@@ -147,10 +134,12 @@ async def save_signal(
                 str(event_id) if event_id is not None else None,
                 fixture_id,
                 commence_time,
-            ),
-        )
-        await db.commit()
-        return True
+            ))
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            # Например, сигнал с таким event_id и market уже существует.
+            return False
 
 
 async def is_signal_sent(
@@ -160,23 +149,17 @@ async def is_signal_sent(
 ) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         if event_id is not None:
-            cursor = await db.execute(
-                """
+            cursor = await db.execute("""
                 SELECT id FROM signals
                 WHERE event_id = ? AND market = ?
                 LIMIT 1
-                """,
-                (str(event_id), market),
-            )
+            """, (str(event_id), market))
         else:
-            cursor = await db.execute(
-                """
+            cursor = await db.execute("""
                 SELECT id FROM signals
                 WHERE match_name = ? AND market = ?
                 LIMIT 1
-                """,
-                (match_name, market),
-            )
+            """, (match_name, market))
 
         return await cursor.fetchone() is not None
 
@@ -221,7 +204,7 @@ async def get_stats():
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT
-                COUNT(*) AS total,
+                COUNT(*),
                 SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN result = 'pending' THEN 1 ELSE 0 END),
@@ -236,7 +219,6 @@ async def get_stats():
     pending = pending or 0
     pushes = pushes or 0
     settled = wins + losses
-    winrate = wins / settled * 100 if settled else 0
 
     return {
         "total": total or 0,
@@ -244,7 +226,7 @@ async def get_stats():
         "losses": losses,
         "pending": pending,
         "pushes": pushes,
-        "winrate": winrate,
+        "winrate": wins / settled * 100 if settled else 0,
     }
 
 
@@ -269,10 +251,11 @@ async def get_users_count():
 
 async def get_user_status(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT is_premium, joined_at FROM users WHERE user_id = ?",
-            (user_id,),
-        )
+        cursor = await db.execute("""
+            SELECT is_premium, joined_at
+            FROM users
+            WHERE user_id = ?
+        """, (user_id,))
         row = await cursor.fetchone()
 
     if not row:
@@ -284,55 +267,57 @@ async def get_user_status(user_id: int):
         return "premium", None
 
     if not joined_at:
-        return "trial", 3
+        return "trial", TRIAL_DAYS
 
     joined = datetime.fromisoformat(joined_at)
-    days_left = 3 - (datetime.utcnow() - joined).days
-    return "trial", max(0, days_left)
+    days_used = max(0, (datetime.utcnow() - joined).days)
+    days_left = max(0, TRIAL_DAYS - days_used)
+
+    return "trial", days_left
 
 
 async def get_today_signals_count():
     async with aiosqlite.connect(DB_PATH) as db:
         today = datetime.utcnow().date().isoformat()
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM signals WHERE date(created_at) = ?",
-            (today,),
-        )
+        cursor = await db.execute("""
+            SELECT COUNT(*)
+            FROM signals
+            WHERE date(created_at) = ?
+        """, (today,))
         row = await cursor.fetchone()
         return row[0] if row else 0
 
 
 async def get_users_ending_trial():
     async with aiosqlite.connect(DB_PATH) as db:
-        two_days_ago = (
-            datetime.utcnow() - timedelta(days=2)
+        trial_end_date = (
+            datetime.utcnow() - timedelta(days=TRIAL_DAYS)
         ).date().isoformat()
 
         cursor = await db.execute("""
-            SELECT user_id FROM users
+            SELECT user_id
+            FROM users
             WHERE is_premium = 0
               AND is_active = 1
               AND date(joined_at) = ?
-        """, (two_days_ago,))
+        """, (trial_end_date,))
         return [row[0] for row in await cursor.fetchall()]
 
 
 async def get_api_cache(cache_key: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            """
+        cursor = await db.execute("""
             SELECT response, expires_at
             FROM api_cache
             WHERE cache_key = ?
-            """,
-            (cache_key,),
-        )
+        """, (cache_key,))
         row = await cursor.fetchone()
 
     if not row:
         return None
 
     response, expires_at = row
+
     if datetime.fromisoformat(expires_at) <= datetime.utcnow():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -342,13 +327,14 @@ async def get_api_cache(cache_key: str):
             await db.commit()
         return None
 
-    import json
     return json.loads(response)
 
 
-async def set_api_cache(cache_key: str, response, ttl_seconds: int):
-    import json
-
+async def set_api_cache(
+    cache_key: str,
+    response,
+    ttl_seconds: int,
+):
     expires_at = (
         datetime.utcnow() + timedelta(seconds=ttl_seconds)
     ).isoformat()
@@ -360,6 +346,9 @@ async def set_api_cache(cache_key: str, response, ttl_seconds: int):
             ON CONFLICT(cache_key) DO UPDATE SET
                 response = excluded.response,
                 expires_at = excluded.expires_at
-        """, (cache_key, json.dumps(response), expires_at))
+        """, (
+            cache_key,
+            json.dumps(response),
+            expires_at,
+        ))
         await db.commit()
-```
