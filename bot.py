@@ -72,26 +72,20 @@ async def show_stats(callback: types.CallbackQuery):
             SELECT match_name, market, odds, edge, result 
             FROM signals 
             ORDER BY created_at DESC 
-            LIMIT 15
+            LIMIT 10
         """)
         signals = await cursor.fetchall()
     
     text = (
-        f"📊 <b>Статистика</b>\n\n"
-        f"Всего сигналов: {stats['total']}\n"
-        f"✅ Выигрыши: {stats['wins']}\n"
-        f"❌ Проигрыши: {stats['losses']}\n"
-        f"⏳ В ожидании: {stats['pending']}\n"
-        f"Проходимость: {stats['winrate']:.1f}%\n\n"
-        f"<b>Последние сигналы:</b>\n"
+        f"📊 <b>Эффективность</b>\n"
+        f"Проходимость {stats['winrate']:.0f}% · сыграно {stats['wins'] + stats['losses']}\n"
+        f"✅ {stats['wins']}  ❌ {stats['losses']}  ⏳ {stats['pending']}\n\n"
+        f"<b>Результаты:</b>\n"
     )
     
     for match_name, market, odds, edge, result in signals:
         icon = "⏳" if result == "pending" else ("✅" if result == "win" else "❌")
         text += f"{icon} {match_name}\n{market} @ {odds:.2f} · edge +{edge*100:.1f}%\n\n"
-    
-    if len(text) > 4000:
-        text = text[:4000] + "..."
     
     await callback.message.edit_text(text, parse_mode="HTML")
     await callback.answer()
