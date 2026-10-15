@@ -68,7 +68,10 @@ async def get_scores():
         "soccer_epl", "soccer_spain_la_liga", "soccer_italy_serie_a",
         "soccer_germany_bundesliga", "soccer_france_ligue_one",
         "soccer_uefa_champs_league", "soccer_uefa_europa_league",
-        "soccer_russia_premier_league", "soccer_portugal_primeira_liga"
+        "soccer_russia_premier_league", "soccer_portugal_primeira_liga",
+        "soccer_brazil_campeonato", "soccer_argentina_primera_division",
+        "soccer_germany_bundesliga2", "soccer_netherlands_eredivisie",
+        "soccer_turkey_super_league", "soccer_belgium_first_div"
     ]
     all_scores = []
     async with aiohttp.ClientSession() as session:
