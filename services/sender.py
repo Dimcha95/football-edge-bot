@@ -63,25 +63,20 @@ async def get_odds():
         return []
 
 async def get_scores():
-    """Получает результаты по всем основным лигам"""
+    """Получает результаты по всем лигам"""
     leagues = [
-        "soccer_epl", "soccer_spain_la_liga", "soccer_italy_serie_a",
-        "soccer_germany_bundesliga", "soccer_france_ligue_one",
-        "soccer_uefa_champs_league", "soccer_uefa_europa_league",
-        "soccer_uefa_europa_conference_league", "soccer_russia_premier_league",
-        "soccer_portugal_primeira_liga", "soccer_brazil_campeonato",
-        "soccer_argentina_primera_division", "soccer_germany_bundesliga2",
-        "soccer_netherlands_eredivisie", "soccer_turkey_super_league",
-        "soccer_belgium_first_div", "soccer_usa_mls", "soccer_mexico_ligamx",
-        "soccer_japan_j_league", "soccer_south_korea_k_league_1",
-        "soccer_china_superleague", "soccer_australia_aleague",
-        "soccer_switzerland_superleague", "soccer_austria_bundesliga",
-        "soccer_denmark_superliga", "soccer_sweden_allsvenskan",
-        "soccer_norway_eliteserien", "soccer_greece_super_league",
-        "soccer_poland_ekstraklasa", "soccer_czech_first_league",
-        "soccer_romania_liga_1", "soccer_serbia_super_liga",
-        "soccer_ukraine_premier_league", "soccer_scotland_premiership",
-        "soccer_ireland_premier_division", "soccer_finland_veikkausliiga"
+        "soccer_england_efl_cup", "soccer_england_league1", "soccer_england_league2",
+        "soccer_epl", "soccer_finland_veikkausliiga", "soccer_france_ligue_one",
+        "soccer_france_ligue_two", "soccer_germany_bundesliga", "soccer_germany_bundesliga2",
+        "soccer_germany_bundesliga_women", "soccer_germany_dfb_pokal", "soccer_germany_liga3",
+        "soccer_greece_super_league", "soccer_italy_serie_a", "soccer_italy_serie_b",
+        "soccer_japan_j_league", "soccer_korea_kleague1", "soccer_league_of_ireland",
+        "soccer_mexico_ligamx", "soccer_netherlands_eredivisie", "soccer_norway_eliteserien",
+        "soccer_poland_ekstraklasa", "soccer_portugal_primeira_liga", "soccer_saudi_arabia_pro_league",
+        "soccer_spain_la_liga", "soccer_spain_segunda_division", "soccer_spl",
+        "soccer_sweden_allsvenskan", "soccer_sweden_superettan", "soccer_switzerland_superleague",
+        "soccer_turkey_super_league", "soccer_uefa_champs_league", "soccer_uefa_europa_conference_league",
+        "soccer_uefa_europa_league", "soccer_uefa_nations_league", "soccer_usa_mls"
     ]
     all_scores = []
     async with aiohttp.ClientSession() as session:
