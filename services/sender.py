@@ -9,8 +9,8 @@ from database import (
 from services.model import calculate_over_probability, calculate_edge
 from services.stats import get_team_stats
 
-MAX_SIGNALS_PER_DAY = 100
-ALLOWED_LINES = (1.5, 2.5,)
+MAX_SIGNALS_PER_DAY = 50
+ALLOWED_LINES = (1.5, 2.5)
 
 async def get_odds():
     """Получает коэффициенты на тоталы из The Odds API"""
@@ -63,20 +63,32 @@ async def get_odds():
         return []
 
 async def get_scores():
-    url = "https://api.the-odds-api.com/v4/sports/soccer/scores"
-    params = {"apiKey": ODDS_API_KEY, "daysFrom": 1}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status != 200:
-                    return []
-                return await resp.json()
-    except:
-        return []
+    """Получает результаты по основным лигам"""
+    leagues = [
+        "soccer_epl", "soccer_spain_la_liga", "soccer_italy_serie_a",
+        "soccer_germany_bundesliga", "soccer_france_ligue_one",
+        "soccer_uefa_champs_league", "soccer_uefa_europa_league",
+        "soccer_russia_premier_league", "soccer_portugal_primeira_liga"
+    ]
+    all_scores = []
+    async with aiohttp.ClientSession() as session:
+        for league in leagues:
+            url = f"https://api.the-odds-api.com/v4/sports/{league}/scores"
+            params = {"apiKey": ODDS_API_KEY, "daysFrom": 1}
+            try:
+                async with session.get(url, params=params, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        all_scores.extend(data)
+            except:
+                continue
+    return all_scores
 
 async def update_results():
     print("Обновляю результаты...")
     scores = await get_scores()
+    print(f"Получено результатов: {len(scores)}")
+    
     for game in scores:
         if not game.get("completed"):
             continue
