@@ -1,8 +1,8 @@
 import asyncio
 from dotenv import load_dotenv
 load_dotenv()
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
@@ -19,19 +19,28 @@ dp = Dispatcher()
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
+def main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Включить сигналы", callback_data="on")],
+        [InlineKeyboardButton(text="❌ Выключить", callback_data="off")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="periods")],
+        [InlineKeyboardButton(text="📋 Сводка за сегодня", callback_data="today")]
+    ])
+
 async def set_commands():
     await bot.set_my_commands(
-        commands=[BotCommand(command="start", description="Start")],
+        [BotCommand(command="start", description="Запуск")],
         scope=BotCommandScopeDefault()
     )
     for admin_id in ADMIN_IDS:
         await bot.set_my_commands(
-            commands=[
-                BotCommand(command="start", description="Start"),
-                BotCommand(command="admin", description="Admin"),
-                BotCommand(command="premium", description="Premium"),
-                BotCommand(command="unpremium", description="Unpremium"),
-                BotCommand(command="today", description="Today")
+            [
+                BotCommand(command="start", description="Запуск"),
+                BotCommand(command="admin", description="Админ"),
+                BotCommand(command="premium", description="Премиум"),
+                BotCommand(command="unpremium", description="Снять премиум"),
+                BotCommand(command="today", description="Сегодня")
             ],
             scope=BotCommandScopeChat(chat_id=admin_id)
         )
@@ -40,7 +49,37 @@ async def set_commands():
 async def cmd_start(message: types.Message):
     await add_user(message.from_user.id, message.from_user.username)
     await set_user_active(message.from_user.id, True)
-    await message.answer("Bot started. Waiting for signals.")
+    await message.answer(
+        "⚽️ <b>Football Edge Bot</b>\n\nБот автоматически ищет value-ставки на футбол.\n\nНажми кнопку, чтобы начать.",
+        reply_markup=main_keyboard(),
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(F.data == "on")
+async def turn_on(callback: types.CallbackQuery):
+    await set_user_active(callback.from_user.id, True)
+    await callback.answer("Сигналы включены")
+    await callback.message.answer("Сигналы включены ✅")
+
+@dp.callback_query(F.data == "off")
+async def turn_off(callback: types.CallbackQuery):
+    await set_user_active(callback.from_user.id, False)
+    await callback.answer("Сигналы выключены")
+    await callback.message.answer("Сигналы выключены ❌")
+
+@dp.callback_query(F.data == "stats")
+async def show_stats(callback: types.CallbackQuery):
+    stats = await get_stats()
+    await callback.message.answer(f"📊 Статистика:\n{stats}")
+
+@dp.callback_query(F.data == "today")
+async def show_today(callback: types.CallbackQuery):
+    count = await get_today_signals_count()
+    await callback.message.answer(f"📋 Сегодня сигналов: {count}")
+
+@dp.callback_query(F.data == "periods")
+async def show_periods(callback: types.CallbackQuery):
+    await callback.message.answer("Статистика по периодам пока в разработке")
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -49,7 +88,7 @@ async def cmd_admin(message: types.Message):
     users = await get_users_count()
     stats = await get_stats()
     today = await get_today_signals_count()
-    await message.answer(f"Users: {users}\nToday signals: {today}\nStats: {stats}")
+    await message.answer(f"Users: {users}\nToday: {today}\n{stats}")
 
 @dp.message(Command("premium"))
 async def give_premium(message: types.Message):
@@ -58,9 +97,9 @@ async def give_premium(message: types.Message):
     try:
         uid = int(message.text.split()[1])
         await set_premium(uid, True)
-        await message.answer(f"Premium given to {uid}")
+        await message.answer(f"Premium → {uid}")
     except:
-        await message.answer("Usage: /premium 123456789")
+        await message.answer("/premium ID")
 
 @dp.message(Command("unpremium"))
 async def remove_premium(message: types.Message):
@@ -69,16 +108,16 @@ async def remove_premium(message: types.Message):
     try:
         uid = int(message.text.split()[1])
         await set_premium(uid, False)
-        await message.answer(f"Premium removed from {uid}")
+        await message.answer(f"Premium снят с {uid}")
     except:
-        await message.answer("Usage: /unpremium 123456789")
+        await message.answer("/unpremium ID")
 
 @dp.message(Command("today"))
 async def cmd_today(message: types.Message):
     if not is_admin(message.from_user.id):
         return
     count = await get_today_signals_count()
-    await message.answer(f"Signals today: {count}")
+    await message.answer(f"Today signals: {count}")
 
 async def on_startup():
     await init_db()
@@ -86,7 +125,7 @@ async def on_startup():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_and_send, "interval", minutes=CHECK_INTERVAL, args=[bot])
     scheduler.start()
-    print("Bot started")
+    print("Football Edge Bot запущен")
 
 async def health_check(request):
     return web.Response(text="OK")
