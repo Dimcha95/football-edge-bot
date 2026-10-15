@@ -45,28 +45,82 @@ async def set_user_active(user_id: int, active: bool):
         )
         await db.commit()
 
-async def set_premium(user_id: int, premium: bool):
+async def set_premium(user_id: int, is_premium: bool):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET is_premium = ? WHERE user_id = ?",
-            (1 if premium else 0, user_id)
+            (1 if is_premium else 0, user_id)
         )
         await db.commit()
+
+async def get_active_users():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM users WHERE is_active = 1"
+        )
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+async def save_signal(match_name: str, league: str, market: str, odds: float, our_prob: float, edge: float):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO signals (match_name, league, market, odds, our_prob, edge, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (match_name, league, market, odds, our_prob, edge, datetime.utcnow().isoformat())
+        )
+        await db.commit()
+
+async def is_signal_sent(match_name: str, market: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id FROM signals WHERE match_name = ? AND market = ?",
+            (match_name, market)
+        )
+        row = await cursor.fetchone()
+        return row is not None
+
+async def get_stats():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result = 'pending' THEN 1 ELSE 0 END) as pending
+            FROM signals
+        """)
+        row = await cursor.fetchone()
+        total, wins, losses, pending = row if row else (0, 0, 0, 0)
+        wins = wins or 0
+        losses = losses or 0
+        pending = pending or 0
+        finished = wins + losses
+        winrate = (wins / finished * 100) if finished > 0 else 0
+        return {
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "pending": pending,
+            "winrate": winrate
+        }
+
+async def get_recent_results(limit: int = 15):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """SELECT match_name, market, odds, edge, result 
+               FROM signals 
+               WHERE result != 'pending'
+               ORDER BY created_at DESC 
+               LIMIT ?""",
+            (limit,)
+        )
+        rows = await cursor.fetchall()
+        return rows
 
 async def get_users_count():
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("SELECT COUNT(*) FROM users")
         return (await cursor.fetchone())[0]
-
-async def get_users_for_signals():
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT user_id FROM users 
-            WHERE is_active = 1 
-            AND (is_premium = 1 OR julianday('now') - julianday(joined_at) <= 3)
-        """)
-        rows = await cursor.fetchall()
-        return [r[0] for r in rows]
 
 async def get_user_status(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -80,25 +134,11 @@ async def get_user_status(user_id: int):
         is_premium, joined_at = row
         if is_premium:
             return "premium", None
+        if not joined_at:
+            return "trial", 3
         joined = datetime.fromisoformat(joined_at)
         days_left = 3 - (datetime.utcnow() - joined).days
         return "trial", max(0, days_left)
-
-async def save_signal(match_name, league, market, odds, our_prob, edge):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO signals (match_name, league, market, odds, our_prob, edge, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (match_name, league, market, odds, our_prob, edge, datetime.utcnow().isoformat()))
-        await db.commit()
-
-async def is_signal_sent(match_name, market):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT 1 FROM signals WHERE match_name = ? AND market = ?",
-            (match_name, market)
-        )
-        return await cursor.fetchone() is not None
 
 async def get_today_signals_count():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -109,28 +149,14 @@ async def get_today_signals_count():
         )
         return (await cursor.fetchone())[0]
 
-async def update_signal_result(match_name, market, result):
+async def get_users_ending_trial():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE signals SET result = ? WHERE match_name = ? AND market = ?",
-            (result, match_name, market)
-        )
-        await db.commit()
-
-async def get_stats():
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT result FROM signals")
+        two_days_ago = (datetime.utcnow() - timedelta(days=2)).date().isoformat()
+        cursor = await db.execute("""
+            SELECT user_id FROM users 
+            WHERE is_premium = 0 
+            AND is_active = 1
+            AND date(joined_at) = ?
+        """, (two_days_ago,))
         rows = await cursor.fetchall()
-        total = len(rows)
-        wins = sum(1 for r in rows if r[0] == "win")
-        losses = sum(1 for r in rows if r[0] == "lose")
-        pending = sum(1 for r in rows if r[0] == "pending")
-        finished = wins + losses
-        winrate = (wins / finished * 100) if finished > 0 else 0
-        return {
-            "total": total,
-            "wins": wins,
-            "losses": losses,
-            "pending": pending,
-            "winrate": winrate
-        }
+        return [r[0] for r in rows]
