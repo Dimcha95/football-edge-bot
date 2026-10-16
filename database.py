@@ -446,3 +446,79 @@ async def get_saved_fixture_history():
         for (fixture_id, league_id, home_id, away_id,
              match_date, home_goals, away_goals, status) in rows
     ]
+
+async def get_over_stats():
+    """Статистика только ТБ 1.5, 2.5, 3.5, ставка 1 ед. на сигнал.
+
+    ROI вычисляется по завершённым ставкам с корректным коэффициентом.
+    Статусы: win, loss, push, pending.
+    """
+    import math
+    import re
+
+    lines = ("1.5", "2.5", "3.5")
+    stats = {
+        line: {
+            "total": 0,
+            "wins": 0,
+            "losses": 0,
+            "pending": 0,
+            "pushes": 0,
+            "profit": 0.0,
+            "roi": 0.0,
+            "winrate": 0.0,
+            "roi_bets": 0,
+        }
+        for line in lines
+    }
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT market, result, odds FROM signals"
+        )
+        rows = await cursor.fetchall()
+
+    for market, result, odds in rows:
+        normalized = re.sub(r"\s+", "", str(market or "")).upper()
+        found = re.fullmatch(r"ТБ(1\.5|2\.5|3\.5)", normalized)
+        if found is None:
+            continue
+
+        item = stats[found.group(1)]
+        item["total"] += 1
+
+        if result == "win":
+            item["wins"] += 1
+        elif result == "loss":
+            item["losses"] += 1
+        elif result == "push":
+            item["pushes"] += 1
+        else:
+            item["pending"] += 1
+            continue
+
+        # Некорректные коэффициенты не включаем в ROI.
+        try:
+            price = float(odds)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(price) or price <= 1:
+            continue
+
+        item["roi_bets"] += 1
+        if result == "win":
+            item["profit"] += price - 1
+        elif result == "loss":
+            item["profit"] -= 1
+        # push: возврат ставки, прибыль 0
+
+    for item in stats.values():
+        decided = item["wins"] + item["losses"]
+        item["winrate"] = round(100 * item["wins"] / decided, 2) if decided else 0.0
+        item["profit"] = round(item["profit"], 2)
+        item["roi"] = (
+            round(100 * item["profit"] / item["roi_bets"], 2)
+            if item["roi_bets"] else 0.0
+        )
+
+    return stats
