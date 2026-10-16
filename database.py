@@ -65,6 +65,25 @@ async def init_db():
             )
         """)
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS match_history (
+                fixture_id INTEGER PRIMARY KEY,
+                league_id INTEGER NOT NULL,
+                home_id INTEGER NOT NULL,
+                away_id INTEGER NOT NULL,
+                match_date TEXT NOT NULL,
+                home_goals INTEGER NOT NULL CHECK(home_goals >= 0),
+                away_goals INTEGER NOT NULL CHECK(away_goals >= 0),
+                status TEXT NOT NULL DEFAULT 'FT',
+                saved_at TEXT NOT NULL
+            )
+        """)
+
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_match_history_league_date
+            ON match_history(league_id, match_date)
+        """)
+
         await db.commit()
 
 
@@ -352,3 +371,78 @@ async def set_api_cache(
             expires_at,
         ))
         await db.commit()
+
+async def save_finished_fixture(item):
+    """Сохраняет один завершённый матч API-Football. Возвращает True при успехе."""
+    if not isinstance(item, dict):
+        return False
+
+    fixture = item.get("fixture") or {}
+    teams = item.get("teams") or {}
+    league = item.get("league") or {}
+    goals = item.get("goals") or {}
+
+    if (fixture.get("status") or {}).get("short") != "FT":
+        return False
+
+    try:
+        fixture_id = int(fixture["id"])
+        league_id = int(league["id"])
+        home_id = int(teams["home"]["id"])
+        away_id = int(teams["away"]["id"])
+        home_goals = int(goals["home"])
+        away_goals = int(goals["away"])
+        match_date = str(fixture["date"])
+        datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+    except (KeyError, ValueError, TypeError):
+        return False
+
+    if (fixture_id <= 0 or league_id <= 0 or home_id <= 0
+            or away_id <= 0 or home_id == away_id
+            or home_goals < 0 or away_goals < 0):
+        return False
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO match_history (
+                fixture_id, league_id, home_id, away_id,
+                match_date, home_goals, away_goals, status, saved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'FT', ?)
+            ON CONFLICT(fixture_id) DO UPDATE SET
+                league_id = excluded.league_id,
+                home_id = excluded.home_id,
+                away_id = excluded.away_id,
+                match_date = excluded.match_date,
+                home_goals = excluded.home_goals,
+                away_goals = excluded.away_goals,
+                status = excluded.status
+        """, (
+            fixture_id, league_id, home_id, away_id, match_date,
+            home_goals, away_goals, datetime.utcnow().isoformat(),
+        ))
+        await db.commit()
+    return True
+
+
+async def get_saved_fixture_history():
+    """Возвращает сохранённые матчи в формате API-Football для team_stats.py."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT fixture_id, league_id, home_id, away_id,
+                   match_date, home_goals, away_goals, status
+            FROM match_history
+            ORDER BY match_date DESC
+        """)
+        rows = await cursor.fetchall()
+
+    return [
+        {
+            "fixture": {"id": fixture_id, "date": match_date,
+                        "status": {"short": status}},
+            "league": {"id": league_id},
+            "teams": {"home": {"id": home_id}, "away": {"id": away_id}},
+            "goals": {"home": home_goals, "away": away_goals},
+        }
+        for (fixture_id, league_id, home_id, away_id,
+             match_date, home_goals, away_goals, status) in rows
+    ]
