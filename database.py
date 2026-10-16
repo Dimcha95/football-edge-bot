@@ -489,7 +489,7 @@ async def get_over_stats():
 
         if result == "win":
             item["wins"] += 1
-        elif result == "loss":
+        elif result in ("loss", "lose"):
             item["losses"] += 1
         elif result == "push":
             item["pushes"] += 1
