@@ -1,5 +1,6 @@
-
 import logging
+import argparse
+import asyncio
 import math
 from datetime import datetime, timezone
 from html import escape
@@ -21,6 +22,7 @@ from services.odds import get_odds
 from services.model import (
     calculate_edge,
     calculate_over_probability,
+    estimate_probability,
 )
 from services.team_stats import (
     get_team_statistics,
@@ -34,6 +36,13 @@ ENABLE_LIVE_SIGNALS = False
 
 # Разрешённые рынки: только тотал больше.
 ALLOWED_OVER_LINES = (1.5, 2.5, 3.5)
+
+# Режимы расчёта. Экспериментальный режим разрешён только для
+# локального просмотра, не для автоматической рассылки.
+HISTORICAL_MODE = "historical"
+EXPERIMENTAL_MODE = "experimental"
+EXPERIMENTAL_HOME_GOALS = 1.5
+EXPERIMENTAL_AWAY_GOALS = 1.4
 
 
 def is_future_match(commence_time):
@@ -256,13 +265,63 @@ def select_best_over_signals(prepared):
     return selected
 
 
-async def load_evaluated_matches():
-    """Загружает коэффициенты и выбирает лучший ТБ на матч."""
+def evaluate_experimental_match(match):
+    """Только демонстрационный расчёт: одинаковые голы для всех команд.
+
+    Вероятность и Edge НЕ являются валидированной оценкой преимущества.
+    """
+    try:
+        line = float(match["line"])
+        odds = float(match["odds"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+    if (line not in ALLOWED_OVER_LINES or not math.isfinite(odds)
+            or odds <= 1):
+        return None
+
+    probability = estimate_probability(
+        line,
+        home_strength=EXPERIMENTAL_HOME_GOALS,
+        away_strength=EXPERIMENTAL_AWAY_GOALS,
+    )
+    edge = calculate_edge(probability, odds)
+    if not all(math.isfinite(x) for x in (probability, edge)):
+        return None
+
+    return {
+        "line": line,
+        "odds": odds,
+        "probability": probability,
+        "edge": edge,
+        "passes_filters": probability >= MIN_PROBABILITY and edge >= MIN_EDGE,
+    }
+
+
+async def load_evaluated_matches(mode=HISTORICAL_MODE):
+    """Выбирает лучший ТБ; experimental доступен только для предпросмотра."""
+    if mode not in (HISTORICAL_MODE, EXPERIMENTAL_MODE):
+        raise ValueError(f"Неизвестный режим: {mode}")
     matches = await get_odds()
 
     if not matches:
         logger.info("Нет доступных коэффициентов")
         return []
+
+    if mode == EXPERIMENTAL_MODE:
+        prepared = []
+        for match in matches:
+            if not is_future_match(match.get("commence_time")):
+                continue
+            evaluation = evaluate_experimental_match(match)
+            if evaluation is not None:
+                prepared.append((match, evaluation))
+        logger.warning(
+            "ЭКСПЕРИМЕНТ: %s вариантов из %s; "
+            "оценки вероятностей не откалиброваны, отправка запрещена",
+            len(prepared), len(matches),
+        )
+        return select_best_over_signals(prepared)
 
     stats, league_totals = await get_team_statistics()
 
@@ -321,7 +380,7 @@ async def test_signal(bot, admin_id=None):
         logger.error("Тест разрешён только администратору")
         return False
 
-    evaluated_matches = await load_evaluated_matches()
+    evaluated_matches = await load_evaluated_matches(mode=HISTORICAL_MODE)
 
     if not evaluated_matches:
         logger.info("Подходящих тестовых сигналов нет")
@@ -398,7 +457,7 @@ async def check_and_send(bot):
         )
         return
 
-    evaluated_matches = await load_evaluated_matches()
+    evaluated_matches = await load_evaluated_matches(mode=HISTORICAL_MODE)
 
     new_signals = 0
 
@@ -517,3 +576,30 @@ async def check_and_send(bot):
         "Новых сохранённых сигналов: %s",
         new_signals,
     )
+
+async def preview_signals(mode=EXPERIMENTAL_MODE, limit=10):
+    """Печатает тестовые варианты. Ничего не отправляет и не сохраняет."""
+    if mode not in (HISTORICAL_MODE, EXPERIMENTAL_MODE):
+        raise ValueError(f"Неизвестный режим: {mode}")
+    print(f"Режим: {mode}")
+    if mode == EXPERIMENTAL_MODE:
+        print("ВНИМАНИЕ: вероятности основаны на одинаковых 2.9 гола для всех матчей.")
+        print("Расчётный Edge не доказывает преимущество. Ставки не рекомендуются.")
+    selected = await load_evaluated_matches(mode=mode)
+    print(f"Подходящих матчей: {len(selected)}")
+    for match, evaluation in selected[:limit]:
+        print(
+            f"{match.get('home', '?')} — {match.get('away', '?')} | "
+            f"ТБ {evaluation['line']:g} @ {evaluation['odds']:.2f} | "
+            f"p={evaluation['probability']:.1%} | "
+            f"условный edge={evaluation['edge']:+.1%}"
+        )
+    print("Сообщения не отправлялись. Сигналы в БД не записывались.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Предпросмотр прогнозов без рассылки")
+    parser.add_argument("--preview", choices=[HISTORICAL_MODE, EXPERIMENTAL_MODE], required=True)
+    parser.add_argument("--limit", type=int, default=10)
+    args = parser.parse_args()
+    asyncio.run(preview_signals(args.preview, max(0, args.limit)))
