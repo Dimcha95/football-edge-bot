@@ -142,7 +142,7 @@ async def fetch_fixture_history():
     saved = 0
 
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-        for day in for day in (today - timedelta(days=i) for i in range(6, -1, -1)):
+        for day in (today - timedelta(days=i) for i in range(6, -1, -1)):
             date_str = day.isoformat()
             cache_key = f"team_stats:fixtures:collect:v1:{date_str}"
             data = await get_api_cache(cache_key)
