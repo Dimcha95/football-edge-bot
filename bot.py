@@ -1,7 +1,6 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from html import escape
 
 from dotenv import load_dotenv
@@ -20,7 +19,7 @@ from aiogram.types import (
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_IDS, CHECK_INTERVAL
+from config import BOT_TOKEN, ADMIN_IDS
 from database import (
     init_db,
     add_user,
@@ -35,7 +34,6 @@ from database import (
 )
 from services.sender import check_and_send
 from services.results import check_results
-from services.team_stats import fetch_fixture_history
 
 
 logging.basicConfig(
@@ -51,7 +49,7 @@ if not BOT_TOKEN:
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-scheduler = AsyncIOScheduler(timezone="UTC")
+scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
 
 def is_admin(user_id: int) -> bool:
@@ -436,18 +434,6 @@ async def scheduled_check_results():
         )
 
 
-async def scheduled_collect_stats():
-    """Сохраняет завершённые матчи в SQLite, не отправляя сигналы."""
-    try:
-        fixtures = await fetch_fixture_history()
-        logger.info(
-            "Сбор истории завершён: в базе %s матчей",
-            len(fixtures),
-        )
-    except Exception:
-        logger.exception("Ошибка при сборе истории матчей")
-
-
 async def health_check(request):
     return web.Response(
         text="OK",
@@ -487,43 +473,41 @@ async def on_startup():
     await set_commands()
 
     if not scheduler.running:
+        # Пять проверок коэффициентов ежедневно, по Москве.
+        # Ночью новые сигналы не ищем.
         scheduler.add_job(
             scheduled_check_and_send,
-            "interval",
-            minutes=max(1, CHECK_INTERVAL),
+            "cron",
+            hour="10,13,16,19,22",
+            minute=0,
+            timezone="Europe/Moscow",
             id="send_signals",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
         )
 
+        # Результаты проверяем четыре раза в сутки.
+        # Внимание: расписание само по себе НЕ гарантирует лимит API.
         scheduler.add_job(
             scheduled_check_results,
-            "interval",
-            minutes=15,
+            "cron",
+            hour="3,9,15,21",
+            minute=30,
+            timezone="Europe/Moscow",
             id="check_results",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
         )
 
-        scheduler.add_job(
-            scheduled_collect_stats,
-            "interval",
-            hours=3,
-            next_run_time=datetime.now(timezone.utc),
-            id="collect_match_history",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
-
+        # Сбор истории отключён: старая модель его не использует.
         scheduler.start()
 
     logger.info(
         "Football Edge Bot запущен. "
-        "Интервал проверки коэффициентов: %s мин.",
-        max(1, CHECK_INTERVAL),
+        "Поиск сигналов: 10, 13, 16, 19, 22 по Москве; "
+        "результаты: 03:30, 09:30, 15:30, 21:30."
     )
 
 
