@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from html import escape
 
 from dotenv import load_dotenv
@@ -33,6 +34,7 @@ from database import (
 )
 from services.sender import check_and_send
 from services.results import check_results
+from services.team_stats import fetch_fixture_history
 
 
 logging.basicConfig(
@@ -395,6 +397,18 @@ async def scheduled_check_results():
         )
 
 
+async def scheduled_collect_stats():
+    """Сохраняет завершённые матчи в SQLite, не отправляя сигналы."""
+    try:
+        fixtures = await fetch_fixture_history()
+        logger.info(
+            "Сбор истории завершён: в базе %s матчей",
+            len(fixtures),
+        )
+    except Exception:
+        logger.exception("Ошибка при сборе истории матчей")
+
+
 async def health_check(request):
     return web.Response(
         text="OK",
@@ -449,6 +463,17 @@ async def on_startup():
             "interval",
             minutes=15,
             id="check_results",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        scheduler.add_job(
+            scheduled_collect_stats,
+            "interval",
+            hours=3,
+            next_run_time=datetime.now(timezone.utc),
+            id="collect_match_history",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
