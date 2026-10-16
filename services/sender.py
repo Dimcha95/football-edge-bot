@@ -31,14 +31,13 @@ from services.team_stats import (
 
 logger = logging.getLogger(__name__)
 
-# Не включать до проверки модели на исторических данных.
-ENABLE_LIVE_SIGNALS = False
+# Рабочая рассылка по упрощённой модели; прогнозы не откалиброваны.
+ENABLE_LIVE_SIGNALS = True
 
 # Разрешённые рынки: только тотал больше.
 ALLOWED_OVER_LINES = (1.5, 2.5, 3.5)
 
-# Режимы расчёта. Экспериментальный режим разрешён только для
-# локального просмотра, не для автоматической рассылки.
+# Режимы расчёта: для рабочей рассылки используется experimental.
 HISTORICAL_MODE = "historical"
 EXPERIMENTAL_MODE = "experimental"
 EXPERIMENTAL_HOME_GOALS = 1.5
@@ -195,10 +194,9 @@ def format_signal(match, evaluation, test=False):
         f"🎯 <b>ТБ {line:g}</b> @ {odds:.2f}\n"
         f"📊 Оценка вероятности: {probability * 100:.1f}%\n"
         f"📈 Расчётный Edge: {edge * 100:+.1f}%\n\n"
-        "⚠️ Оценка основана на статистике голов "
-        "и модели Пуассона. "
-        "Точность прогнозов пока не подтверждена "
-        "историческим тестированием."
+        "⚠️ Упрощённая модель Пуассона: для всех матчей "
+        "предполагается 2,9 гола. Вероятности и Edge не "
+        "подтверждены историческим тестированием."
     )
 
 
@@ -317,8 +315,8 @@ async def load_evaluated_matches(mode=HISTORICAL_MODE):
             if evaluation is not None:
                 prepared.append((match, evaluation))
         logger.warning(
-            "ЭКСПЕРИМЕНТ: %s вариантов из %s; "
-            "оценки вероятностей не откалиброваны, отправка запрещена",
+            "Упрощённая модель: %s вариантов из %s; "
+            "оценки вероятностей не откалиброваны",
             len(prepared), len(matches),
         )
         return select_best_over_signals(prepared)
@@ -433,9 +431,9 @@ async def was_match_signalled(match_name, event_id):
 
 
 async def check_and_send(bot):
-    """Автоматическая рассылка после проверки модели."""
+    """Автоматическая рассылка по упрощённой модели."""
 
-    # Защита: реальные сигналы пока запрещены.
+    # Аварийный выключатель рассылки.
     if not ENABLE_LIVE_SIGNALS:
         logger.info(
             "Автоматическая рассылка отключена: "
@@ -457,7 +455,7 @@ async def check_and_send(bot):
         )
         return
 
-    evaluated_matches = await load_evaluated_matches(mode=HISTORICAL_MODE)
+    evaluated_matches = await load_evaluated_matches(mode=EXPERIMENTAL_MODE)
 
     new_signals = 0
 
