@@ -1,7 +1,15 @@
 
 import logging
+from datetime import datetime, timezone
+from html import escape
 
-from config import MIN_EDGE, MIN_PROBABILITY, MAX_SIGNALS_PER_DAY
+from config import (
+    ADMIN_IDS,
+    MIN_EDGE,
+    MIN_PROBABILITY,
+    MAX_SIGNALS_PER_DAY,
+)
+
 from database import (
     get_active_users,
     get_user_status,
@@ -9,10 +17,16 @@ from database import (
     is_signal_sent,
     get_today_signals_count,
 )
+
 from services.odds import get_odds
 from services.model import calculate_edge
 
 logger = logging.getLogger(__name__)
+
+
+# Пока нет реальных ожидаемых голов команд,
+# массовую отправку отключаем.
+ENABLE_LIVE_SIGNALS = False
 
 
 def estimate_probability(
@@ -21,10 +35,13 @@ def estimate_probability(
     away_strength: float = 1.4,
 ) -> float:
     """
-    Предварительная эвристическая оценка вероятности.
-    Не является обученной моделью и не гарантирует результат.
+    Временная эвристика.
+    Используется только для диагностики.
     """
-    expected_total = (home_strength + away_strength) / 2
+
+    expected_total = (
+        home_strength + away_strength
+    ) / 2
 
     base = {
         1.5: 0.68,
@@ -40,17 +57,45 @@ def estimate_probability(
     return max(0.15, min(0.85, base))
 
 
+def is_future_match(commence_time):
+    """Проверяет, что матч ещё не начался."""
+
+    if not commence_time:
+        return False
+
+    try:
+        kickoff = datetime.fromisoformat(
+            str(commence_time).replace(
+                "Z", "+00:00"
+            )
+        )
+
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(
+                tzinfo=timezone.utc
+            )
+
+        return kickoff > datetime.now(timezone.utc)
+
+    except (ValueError, TypeError):
+        return False
+
+
 async def get_eligible_users():
-    """Возвращает активных пользователей с действующим доступом."""
+    """Активные пользователи с действующим доступом."""
+
     active_users = await get_active_users()
     eligible_users = []
 
     for user_id in active_users:
         try:
-            status, days_left = await get_user_status(user_id)
+            status, days_left = await get_user_status(
+                user_id
+            )
 
             if status == "premium":
                 eligible_users.append(user_id)
+
             elif (
                 status == "trial"
                 and days_left is not None
@@ -60,54 +105,234 @@ async def get_eligible_users():
 
         except Exception:
             logger.exception(
-                "Не удалось проверить доступ пользователя %s",
+                "Ошибка проверки доступа пользователя %s",
                 user_id,
             )
 
     return eligible_users
 
 
-async def check_and_send(bot):
-    logger.info("Запущена проверка коэффициентов")
+def evaluate_match(match):
+    """
+    Рассчитывает предварительные показатели.
+    Возвращает None для некорректного матча.
+    """
+
+    try:
+        line = float(match["line"])
+        odds = float(match["odds"])
+
+        home_strength = float(
+            match.get("home_strength", 1.5)
+        )
+        away_strength = float(
+            match.get("away_strength", 1.4)
+        )
+
+    except (KeyError, ValueError, TypeError):
+        return None
+
+    if odds <= 1:
+        return None
+
+    probability = estimate_probability(
+        line,
+        home_strength,
+        away_strength,
+    )
+
+    edge = calculate_edge(
+        probability,
+        odds,
+    )
+
+    return {
+        "line": line,
+        "odds": odds,
+        "probability": probability,
+        "edge": edge,
+        "passes_filters": (
+            probability >= MIN_PROBABILITY
+            and edge >= MIN_EDGE
+        ),
+    }
+
+
+def format_signal(match, evaluation, test=False):
+    """Формирует сообщение Telegram."""
+
+    home = escape(str(match.get("home", "")))
+    away = escape(str(match.get("away", "")))
+    league = escape(
+        str(match.get("league", "Футбол"))
+    )
+    commence_time = escape(
+        str(match.get("commence_time", ""))
+    )
+
+    line = evaluation["line"]
+    odds = evaluation["odds"]
+    probability = evaluation["probability"]
+    edge = evaluation["edge"]
+
+    prefix = (
+        "🧪 <b>ТЕСТОВЫЙ СИГНАЛ</b>\n"
+        if test else
+        "⚽️ <b>FOOTBALL EDGE BOT</b>\n"
+    )
+
+    return (
+        f"{prefix}\n"
+        f"⚽️ <b>{home} — {away}</b>\n"
+        f"🏆 {league}\n"
+        f"🕒 {commence_time}\n\n"
+        f"🎯 ТБ {line:g} @ {odds:.2f}\n"
+        f"📊 Оценка вероятности: "
+        f"{probability * 100:.1f}%\n"
+        f"📈 Расчётный Edge: "
+        f"{edge * 100:+.1f}%\n\n"
+        "⚠️ Вероятность основана на временной "
+        "эвристике и не подтверждена "
+        "статистической моделью."
+    )
+
+
+async def test_signal(bot, admin_id=None):
+    """
+    Отправляет один диагностический сигнал
+    только администратору.
+
+    Не сохраняет его в базу данных.
+    """
+
+    if not ADMIN_IDS:
+        logger.error("ADMIN_IDS не настроен")
+        return False
+
+    if admin_id is None:
+        admin_id = ADMIN_IDS[0]
+
+    if admin_id not in ADMIN_IDS:
+        logger.error(
+            "Тест разрешён только администратору"
+        )
+        return False
 
     matches = await get_odds()
-    logger.info("Получено вариантов коэффициентов: %s", len(matches))
+
+    logger.info(
+        "Для тестирования получено %s вариантов",
+        len(matches),
+    )
+
+    for match in matches:
+
+        if not is_future_match(
+            match.get("commence_time")
+        ):
+            continue
+
+        evaluation = evaluate_match(match)
+
+        if evaluation is None:
+            continue
+
+        if not evaluation["passes_filters"]:
+            continue
+
+        text = format_signal(
+            match,
+            evaluation,
+            test=True,
+        )
+
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                parse_mode="HTML",
+            )
+
+            logger.info(
+                "Тестовый сигнал отправлен %s",
+                admin_id,
+            )
+
+            return True
+
+        except Exception:
+            logger.exception(
+                "Ошибка тестовой отправки"
+            )
+            return False
+
+    logger.info(
+        "Подходящих тестовых сигналов нет"
+    )
+    return False
+
+
+async def check_and_send(bot):
+    """
+    Основная автоматическая проверка.
+
+    Пока модель использует временные
+    вероятности, отправка отключена.
+    """
+
+    if not ENABLE_LIVE_SIGNALS:
+        logger.info(
+            "Автоматическая рассылка отключена: "
+            "нет подтверждённой модели вероятностей"
+        )
+        return
+
+    matches = await get_odds()
 
     today_count = await get_today_signals_count()
 
     if today_count >= MAX_SIGNALS_PER_DAY:
-        logger.info("Достигнут дневной лимит: %s", MAX_SIGNALS_PER_DAY)
+        logger.info(
+            "Достигнут дневной лимит сигналов"
+        )
         return
 
     users = await get_eligible_users()
 
     if not users:
-        logger.info("Нет пользователей с действующим доступом")
+        logger.info(
+            "Нет активных пользователей с доступом"
+        )
         return
 
     new_signals = 0
 
     for match in matches:
+
         if today_count + new_signals >= MAX_SIGNALS_PER_DAY:
-            logger.info("Достигнут дневной лимит сигналов")
             break
+
+        if not is_future_match(
+            match.get("commence_time")
+        ):
+            continue
 
         event_id = match.get("event_id")
         home = match.get("home")
         away = match.get("away")
-        league = match.get("league", "Футбол")
-        commence_time = match.get("commence_time")
-        fixture_id = match.get("fixture_id")
 
-        try:
-            line = float(match["line"])
-            odds = float(match["odds"])
-        except (KeyError, TypeError, ValueError):
-            logger.warning("Пропущен матч с некорректными коэффициентами")
+        if not event_id or not home or not away:
             continue
 
-        if not event_id or not home or not away or odds <= 1:
+        evaluation = evaluate_match(match)
+
+        if evaluation is None:
             continue
+
+        if not evaluation["passes_filters"]:
+            continue
+
+        line = evaluation["line"]
 
         match_name = f"{home} — {away}"
         market_name = f"ТБ {line:g}"
@@ -119,71 +344,72 @@ async def check_and_send(bot):
         ):
             continue
 
-        probability = estimate_probability(
-            line,
-            match.get("home_strength", 1.5),
-            match.get("away_strength", 1.4),
-        )
-        edge = calculate_edge(probability, odds)
-
-        if probability < MIN_PROBABILITY or edge < MIN_EDGE:
-            continue
-
-        text = (
-            f"⚽️ <b>{match_name}</b>\n"
-            f"🏆 {league}\n"
-            f"🕒 {commence_time or 'Время неизвестно'}\n\n"
-            f"🎯 <b>{market_name}</b> @ {odds:.2f}\n"
-            f"📊 Оценка вероятности: <b>{probability * 100:.1f}%</b>\n"
-            f"📈 Расчётный edge: <b>{edge * 100:+.1f}%</b>\n\n"
-            "ℹ️ Вероятность предварительная, "
-            "это не гарантия результата."
+        text = format_signal(
+            match,
+            evaluation,
         )
 
-        try:
-            saved = await save_signal(
-                match_name=match_name,
-                league=league,
-                market=market_name,
-                odds=odds,
-                our_prob=probability,
-                edge=edge,
-                event_id=str(event_id),
-                fixture_id=int(fixture_id) if fixture_id is not None else None,
-                commence_time=commence_time,
-            )
-        except Exception:
-            logger.exception("Не удалось сохранить сигнал: %s", match_name)
-            continue
-
-        if not saved:
-            logger.info("Дубликат сигнала пропущен: %s", match_name)
-            continue
-
+        # Отправка до сохранения не гарантирует
+        # отсутствие дублей при аварийном завершении.
+        # Для production потребуется таблица
+        # доставки сигналов по пользователям.
         delivered = 0
 
         for user_id in users:
             try:
                 await bot.send_message(
-                    user_id,
-                    text,
+                    chat_id=user_id,
+                    text=text,
                     parse_mode="HTML",
                 )
+
                 delivered += 1
+
             except Exception:
                 logger.exception(
-                    "Не удалось отправить сигнал пользователю %s",
+                    "Ошибка отправки пользователю %s",
                     user_id,
                 )
 
-        new_signals += 1
+        if delivered == 0:
+            logger.warning(
+                "Сигнал никому не доставлен: %s",
+                match_name,
+            )
+            continue
 
-        logger.info(
-            "Сигнал сохранён: %s, %s; доставлено: %s из %s",
-            match_name,
-            market_name,
-            delivered,
-            len(users),
-        )
+        fixture_id = match.get("fixture_id")
 
-    logger.info("Новых сигналов за проверку: %s", new_signals)
+        try:
+            saved = await save_signal(
+                match_name=match_name,
+                league=match.get(
+                    "league", "Футбол"
+                ),
+                market=market_name,
+                odds=evaluation["odds"],
+                our_prob=evaluation["probability"],
+                edge=evaluation["edge"],
+                event_id=str(event_id),
+                fixture_id=(
+                    int(fixture_id)
+                    if fixture_id is not None
+                    else None
+                ),
+                commence_time=match.get(
+                    "commence_time"
+                ),
+            )
+
+            if saved:
+                new_signals += 1
+
+        except Exception:
+            logger.exception(
+                "Ошибка сохранения сигнала"
+            )
+
+    logger.info(
+        "Новых сохранённых сигналов: %s",
+        new_signals,
+    )
