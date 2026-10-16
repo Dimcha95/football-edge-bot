@@ -195,6 +195,9 @@ def parse_odds(raw_data, fixture_map):
         matches.append({
             "event_id": f"api_football_{fixture_id}",
             "fixture_id": fixture_id,
+            "home_id": match["home_id"],
+            "away_id": match["away_id"],
+            "league_id": match["league_id"],
             "home": match["home"],
             "away": match["away"],
             "league": match["league"],
@@ -298,7 +301,10 @@ async def get_odds():
                 if not home or not away:
                     continue
 
-                fixture_map[fixture_id] = {
+                fixture_map[fixture_id] = {   
+                    "home_id": (teams.get("home") or {}).get("id"),
+                    "away_id": (teams.get("away") or {}).get("id"),
+                    "league_id": league.get("id"),
                     "home": home,
                     "away": away,
                     "league": league.get(
