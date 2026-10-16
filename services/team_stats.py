@@ -19,8 +19,8 @@ from database import (
 logger = logging.getLogger(__name__)
 BASE_URL = "https://v3.football.api-sports.io"
 CACHE_TTL = 60 * 60  # Кеш успешных ответов на час.
-MIN_TEAM_MATCHES = 3
-MIN_LEAGUE_MATCHES = 10
+MIN_TEAM_MATCHES = 2
+MIN_LEAGUE_MATCHES = 5
 MIN_EXPECTED_GOALS = 0.25
 MAX_EXPECTED_GOALS = 4.0
 
