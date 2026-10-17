@@ -17,12 +17,12 @@ MIN_TEAM_MATCHES = 2
 MIN_LEAGUE_MATCHES = 5
 MIN_EXPECTED_GOALS = 0.25
 MAX_EXPECTED_GOALS = 4.0
-# First collection: 14 days. Subsequent calls: recent 2 days.
-INITIAL_LOOKBACK_DAYS = 14
+# Build a 60-day history once, then refresh the latest 2 days.
+INITIAL_LOOKBACK_DAYS = 60
 RECENT_LOOKBACK_DAYS = 2
 PAGE_SIZE = 200
-MAX_PAGES = 10
-MAX_SAVED_PER_RUN = 1500
+MAX_PAGES = 50
+MAX_SAVED_PER_RUN = 10000
 
 
 def safe_divide(a, b, default=0.0):
@@ -114,7 +114,20 @@ async def fetch_fixture_history():
         logger.warning("BSD_API_KEY missing; using saved history (%d)", len(existing))
         return existing
     today = datetime.now(timezone.utc).date()
-    days = INITIAL_LOOKBACK_DAYS if not existing else RECENT_LOOKBACK_DAYS
+    # Existing history may contain only the last 14 days. Backfill to 60.
+    oldest = None
+    for item in existing:
+        raw = str(item.get("match_date") or "")[:10]
+        try:
+            day = datetime.fromisoformat(raw).date()
+        except ValueError:
+            continue
+        if oldest is None or day < oldest:
+            oldest = day
+    target = today - timedelta(days=INITIAL_LOOKBACK_DAYS)
+    days = (INITIAL_LOOKBACK_DAYS if oldest is None or oldest > target + timedelta(days=1)
+            else RECENT_LOOKBACK_DAYS)
+    logger.info("BSD history lookback: %d days", days)
     params = {
         "status": "finished",
         "date_from": (today - timedelta(days=days)).isoformat(),
