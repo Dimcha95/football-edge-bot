@@ -3,6 +3,7 @@ import asyncio
 import logging
 import math
 import os
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -13,20 +14,38 @@ from database import save_bsd_finished_event, get_bsd_match_history
 load_dotenv()
 logger = logging.getLogger(__name__)
 BASE_URL = "https://sports.bzzoiro.com/api/v2"
-MIN_TEAM_MATCHES = 2
-MIN_LEAGUE_MATCHES = 5
+
+# Минимум матчей для оценки. Мало данных = шумные оценки и ложные сигналы.
+MIN_TEAM_MATCHES = 4
+MIN_LEAGUE_MATCHES = 20
 MIN_EXPECTED_GOALS = 0.25
 MAX_EXPECTED_GOALS = 4.0
-# Build a 60-day history once, then refresh the latest 2 days.
-INITIAL_LOOKBACK_DAYS = 60
+
+# Сглаживание: оценка команды смешивается со средним по лиге, как будто
+# у команды есть ещё SHRINKAGE_MATCHES «средних» матчей.
+SHRINKAGE_MATCHES = 4
+
+# История: один раз за запуск грузим INITIAL_LOOKBACK_DAYS, дальше — свежие дни.
+INITIAL_LOOKBACK_DAYS = 90
 RECENT_LOOKBACK_DAYS = 2
 PAGE_SIZE = 200
-MAX_PAGES = 50
-MAX_SAVED_PER_RUN = 10000
+MAX_PAGES = 100
+MAX_SAVED_PER_RUN = 20000
+
+# Готовая статистика кэшируется в памяти, чтобы не дёргать API каждый час.
+STATS_CACHE_SECONDS = 3 * 60 * 60
+
+_BACKFILL_DONE = False
+_STATS_CACHE = None  # (timestamp, stats, league_totals)
 
 
 def safe_divide(a, b, default=0.0):
     return a / b if b else default
+
+
+def shrunk_average(total, played, league_avg):
+    """Среднее команды, подтянутое к среднему по лиге."""
+    return (total + SHRINKAGE_MATCHES * league_avg) / (played + SHRINKAGE_MATCHES)
 
 
 def calculate_team_stats(fixtures):
@@ -88,10 +107,18 @@ def estimate_expected_goals(home_id, away_id, league_id, stats, league_totals):
     league_away_avg = safe_divide(league["away_goals"], league["matches"])
     if league_home_avg <= 0 or league_away_avg <= 0:
         return None
-    home_attack = safe_divide(home["home_scored"], home["home_played"]) / league_home_avg
-    away_defense = safe_divide(away["away_conceded"], away["away_played"]) / league_home_avg
-    away_attack = safe_divide(away["away_scored"], away["away_played"]) / league_away_avg
-    home_defense = safe_divide(home["home_conceded"], home["home_played"]) / league_away_avg
+
+    # Сглаженные средние: гол за матч / пропущено за матч.
+    home_scored_avg = shrunk_average(home["home_scored"], home["home_played"], league_home_avg)
+    home_conceded_avg = shrunk_average(home["home_conceded"], home["home_played"], league_away_avg)
+    away_scored_avg = shrunk_average(away["away_scored"], away["away_played"], league_away_avg)
+    away_conceded_avg = shrunk_average(away["away_conceded"], away["away_played"], league_home_avg)
+
+    home_attack = home_scored_avg / league_home_avg
+    away_defense = away_conceded_avg / league_home_avg
+    away_attack = away_scored_avg / league_away_avg
+    home_defense = home_conceded_avg / league_away_avg
+
     home_xg = league_home_avg * home_attack * away_defense
     away_xg = league_away_avg * away_attack * home_defense
     if not all(map(math.isfinite, (home_xg, away_xg))):
@@ -108,13 +135,15 @@ async def fetch_fixture_history():
 
     The server's date filtering/pagination must be verified in VPS logs.
     """
+    global _BACKFILL_DONE
+
     existing = await get_bsd_match_history()
     token = os.getenv("BSD_API_KEY", "").strip()
     if not token:
         logger.warning("BSD_API_KEY missing; using saved history (%d)", len(existing))
         return existing
     today = datetime.now(timezone.utc).date()
-    # Existing history may contain only the last 14 days. Backfill to 60.
+
     oldest = None
     for item in existing:
         raw = str(item.get("match_date") or "")[:10]
@@ -125,8 +154,9 @@ async def fetch_fixture_history():
         if oldest is None or day < oldest:
             oldest = day
     target = today - timedelta(days=INITIAL_LOOKBACK_DAYS)
-    days = (INITIAL_LOOKBACK_DAYS if oldest is None or oldest > target + timedelta(days=1)
-            else RECENT_LOOKBACK_DAYS)
+    need_backfill = (not _BACKFILL_DONE
+                     and (oldest is None or oldest > target + timedelta(days=1)))
+    days = INITIAL_LOOKBACK_DAYS if need_backfill else RECENT_LOOKBACK_DAYS
     logger.info("BSD history lookback: %d days", days)
     params = {
         "status": "finished",
@@ -138,6 +168,7 @@ async def fetch_fixture_history():
     timeout = aiohttp.ClientTimeout(total=30)
     headers = {"Authorization": f"Token {token}"}
     saved = 0
+    completed = False
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         for _ in range(MAX_PAGES):
             try:
@@ -155,6 +186,7 @@ async def fetch_fixture_history():
                 break
             batch = data["results"]
             if not batch:
+                completed = True
                 break
             for event in batch:
                 try:
@@ -164,16 +196,34 @@ async def fetch_fixture_history():
                     logger.exception("Could not store BSD event")
                 if saved >= MAX_SAVED_PER_RUN:
                     break
-            if saved >= MAX_SAVED_PER_RUN or not data.get("next"):
+            if saved >= MAX_SAVED_PER_RUN:
+                break
+            if not data.get("next"):
+                completed = True
                 break
             params["offset"] += len(batch)
+
+    # Полный бэкфилл больше не повторяем до перезапуска процесса.
+    if need_backfill and completed:
+        _BACKFILL_DONE = True
+
     history = await get_bsd_match_history()
     logger.info("BSD history: processed %d, stored total %d", saved, len(history))
     return history
 
 
 async def get_team_statistics():
+    global _STATS_CACHE
+
+    if _STATS_CACHE and time.monotonic() - _STATS_CACHE[0] < STATS_CACHE_SECONDS:
+        return _STATS_CACHE[1], _STATS_CACHE[2]
+
     fixtures = await fetch_fixture_history()
     stats, league_totals = calculate_team_stats(fixtures)
     logger.info("BSD stats: %d team/league pairs, %d leagues", len(stats), len(league_totals))
+
+    # Пустой результат не кэшируем, чтобы повторить попытку при следующем запуске.
+    if stats and league_totals:
+        _STATS_CACHE = (time.monotonic(), stats, league_totals)
+
     return stats, league_totals
