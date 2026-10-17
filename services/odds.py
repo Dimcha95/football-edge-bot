@@ -30,9 +30,9 @@ def _name(value):
 
 
 def _kickoff(event):
-    return (event.get("start_time") or event.get("kickoff") or
-            event.get("date") or event.get("match_date") or
-            event.get("scheduled_at") or "")
+    return (event.get("event_date") or event.get("start_time") or
+            event.get("kickoff") or event.get("date") or
+            event.get("match_date") or event.get("scheduled_at") or "")
 
 
 def _future(raw):
@@ -72,7 +72,7 @@ async def get_odds():
         return []
 
     today = datetime.now(timezone.utc).date()
-    params = {"date_from": today.isoformat(),
+    params = {"status": "upcoming", "date_from": today.isoformat(),
               "date_to": (today + timedelta(days=1)).isoformat(),
               "limit": 200, "offset": 0}
     timeout = aiohttp.ClientTimeout(total=25)
@@ -137,5 +137,5 @@ async def get_odds():
 
         groups = await asyncio.gather(*(evaluate(row) for row in eligible))
         result = [item for group in groups for item in group]
-        logger.info("BSD: %d upcoming matches, %d total-goals prices", len(eligible), len(result))
+        logger.info("BSD: %d events, %d upcoming, %d total-goals prices", len(events), len(eligible), len(result))
         return result
