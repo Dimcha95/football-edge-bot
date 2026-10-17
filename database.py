@@ -74,6 +74,11 @@ async def init_db():
                     f"ALTER TABLE signals ADD COLUMN {column} {column_type}"
                 )
 
+        # Старые версии писали 'lose'; приводим к единому значению 'loss'.
+        await db.execute(
+            "UPDATE signals SET result = 'loss' WHERE result = 'lose'"
+        )
+
         await db.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_event_market
             ON signals(event_id, market)
