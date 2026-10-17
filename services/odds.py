@@ -36,6 +36,17 @@ MAX_EVENTS = _int_env("BSD_MAX_EVENTS", 400)
 
 _CACHE = {}
 
+LEAGUE_NAMES_TTL = 24 * 60 * 60
+_LEAGUE_NAMES = {}
+_LEAGUE_NAMES_TS = 0.0
+
+
+def _to_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 
 def _purge_cache():
     """Удаляет просроченные записи, чтобы кэш не рос бесконечно."""
@@ -106,6 +117,52 @@ async def _get(session, path, params=None):
         return None
 
 
+async def _league_names(session):
+    """Справочник {league_id: 'Название (Страна)'}, обновляется раз в сутки."""
+    global _LEAGUE_NAMES, _LEAGUE_NAMES_TS
+
+    if _LEAGUE_NAMES and time.monotonic() - _LEAGUE_NAMES_TS < LEAGUE_NAMES_TTL:
+        return _LEAGUE_NAMES
+
+    names = {}
+    params = {"limit": 100, "offset": 0}
+    for _ in range(10):
+        try:
+            async with session.get(BASE + "/leagues/", params=params) as response:
+                if response.status != 200:
+                    logger.warning("BSD leagues HTTP %s", response.status)
+                    break
+                data = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            logger.warning("BSD leagues request failed: %s", exc)
+            break
+
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            break
+
+        batch = data["results"]
+        for item in batch:
+            if not isinstance(item, dict):
+                continue
+            league_id = _to_int(item.get("id"))
+            name = str(item.get("name") or "").strip()
+            country = str(item.get("country") or "").strip()
+            if league_id is None or not name:
+                continue
+            names[league_id] = f"{name} ({country})" if country and country not in name else name
+
+        if not data.get("next") or not batch:
+            break
+        params["offset"] += len(batch)
+
+    if names:
+        _LEAGUE_NAMES = names
+        _LEAGUE_NAMES_TS = time.monotonic()
+        logger.info("BSD leagues loaded: %d", len(names))
+
+    return _LEAGUE_NAMES or names
+
+
 async def get_odds():
     """Return sender-compatible match/line rows for upcoming BSD fixtures."""
     token = os.getenv("BSD_API_KEY", "").strip()
@@ -152,6 +209,8 @@ async def get_odds():
         eligible.sort(key=lambda row: _parse_dt(row[4]) or datetime.max.replace(tzinfo=timezone.utc))
         eligible = eligible[:MAX_EVENTS]
 
+        league_names = await _league_names(session)
+
         sem = asyncio.Semaphore(MAX_PARALLEL)
 
         async def evaluate(row):
@@ -167,6 +226,8 @@ async def get_odds():
             home_id = _nested_id(event, "home_team", "home_team_id")
             away_id = _nested_id(event, "away_team", "away_team_id")
             league_id = _nested_id(event, "league", "league_id")
+            if league == "Football":
+                league = league_names.get(_to_int(league_id)) or league
             result = []
             for line, field in LINES.items():
                 try:
