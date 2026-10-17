@@ -84,6 +84,25 @@ async def init_db():
             ON match_history(league_id, match_date)
         """)
 
+        # BSD history is independent of legacy API-Football fixture IDs.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bsd_match_history (
+                event_id TEXT PRIMARY KEY,
+                league_id INTEGER NOT NULL,
+                home_id INTEGER NOT NULL,
+                away_id INTEGER NOT NULL,
+                match_date TEXT NOT NULL,
+                home_goals INTEGER NOT NULL CHECK(home_goals >= 0),
+                away_goals INTEGER NOT NULL CHECK(away_goals >= 0),
+                status TEXT NOT NULL DEFAULT 'finished',
+                saved_at TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bsd_history_league_date
+            ON bsd_match_history(league_id, match_date)
+        """)
+
         await db.commit()
 
 
@@ -522,3 +541,101 @@ async def get_over_stats():
         )
 
     return stats
+
+async def save_bsd_finished_event(event):
+    """Store a finished BSD event. Never mix BSD IDs with API-Football IDs.
+
+    Returns True for a valid upsert, False for invalid/incomplete data.
+    This expects the event dictionary from BSD /api/v2/events/.
+    """
+    if not isinstance(event, dict):
+        return False
+    if isinstance(event.get("event"), dict):
+        event = event["event"]
+
+    status = str(event.get("status") or "").strip().lower()
+    period = str(event.get("period") or "").strip().upper()
+    if status != "finished" or period != "FT":
+        return False
+    if event.get("cancelled") or event.get("postponed"):
+        return False
+
+    event_id = event.get("id")
+    if event_id is None or isinstance(event_id, bool) or not str(event_id).strip():
+        return False
+
+    try:
+        league_id = int(event["league_id"])
+        home_id = int(event["home_team_id"])
+        away_id = int(event["away_team_id"])
+        home_goals = int(event["home_score"])
+        away_goals = int(event["away_score"])
+        if any(isinstance(event[key], bool) for key in (
+            "league_id", "home_team_id", "away_team_id", "home_score", "away_score"
+        )):
+            return False
+        if str(event["home_score"]).strip() != str(home_goals):
+            return False
+        if str(event["away_score"]).strip() != str(away_goals):
+            return False
+        date_raw = str(event["event_date"])
+        date_obj = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return False
+
+    if (min(league_id, home_id, away_id) <= 0 or home_id == away_id
+            or min(home_goals, away_goals) < 0):
+        return False
+
+    # Guard against malformed or ambiguous scores for extra-time matches.
+    if event.get("extra_time_score") not in (None, ""):
+        return False
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO bsd_match_history (
+                event_id, league_id, home_id, away_id, match_date,
+                home_goals, away_goals, status, saved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'finished', ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                league_id = excluded.league_id,
+                home_id = excluded.home_id,
+                away_id = excluded.away_id,
+                match_date = excluded.match_date,
+                home_goals = excluded.home_goals,
+                away_goals = excluded.away_goals,
+                status = excluded.status,
+                saved_at = excluded.saved_at
+        """, (
+            str(event_id), league_id, home_id, away_id,
+            date_obj.isoformat(), home_goals, away_goals,
+            datetime.utcnow().isoformat(),
+        ))
+        await db.commit()
+    return True
+
+
+async def get_bsd_match_history():
+    """Return normalized BSD history for the future team_stats adapter."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT event_id, league_id, home_id, away_id, match_date,
+                   home_goals, away_goals, status
+            FROM bsd_match_history
+            ORDER BY match_date DESC
+        """)
+        rows = await cursor.fetchall()
+    return [
+        {
+            "event_id": event_id,
+            "league_id": league_id,
+            "home_id": home_id,
+            "away_id": away_id,
+            "match_date": match_date,
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+            "status": status,
+        }
+        for (event_id, league_id, home_id, away_id, match_date,
+             home_goals, away_goals, status) in rows
+    ]
