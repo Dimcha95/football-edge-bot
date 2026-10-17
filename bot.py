@@ -496,7 +496,7 @@ async def on_startup():
     await set_commands()
 
     if not scheduler.running:
-        # Проверка сигналов каждый час с 10:00 до 22:00 МСК.
+        # Проверка сигналов каждый час с 08:00 до 23:00 МСК.
         scheduler.add_job(
             scheduled_check_and_send,
             "cron",
