@@ -1,366 +1,141 @@
+"""BSD Football API adapter for Football Edge Bot.
 
+Replace services/odds.py with this file. The sender expects one dict per
+match and Over line. BSD event IDs are NOT API-Football fixture IDs.
+"""
 import asyncio
 import logging
-import re
+import math
+import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+from dotenv import load_dotenv
 
-from config import API_FOOTBALL_KEY
-from database import get_api_cache, set_api_cache
-
+load_dotenv()
 logger = logging.getLogger(__name__)
-
-API_BASE = "https://v3.football.api-sports.io"
-
-# API-Football: Goals Over/Under
-TOTALS_BET_ID = 5
-SUPPORTED_LINES = {1.5, 2.5, 3.5}
-
-# Ограничиваем расходы бесплатного тарифа.
-MAX_PAGES_PER_DATE = 2
-DAYS_AHEAD = 2
-CACHE_TTL = 3 * 60 * 60
-
-TIMEOUT = aiohttp.ClientTimeout(total=25)
+BASE = "https://sports.bzzoiro.com/api/v2"
+LINES = {1.5: "over_15_goals", 2.5: "over_25_goals", 3.5: "over_35_goals"}
+CACHE_SECONDS = 20 * 60
+MAX_EVENTS = 400
+MAX_PARALLEL = 5
+_CACHE = {}
 
 
-async def api_get(session, endpoint, params):
-    """Запрос API-Football с кешированием."""
+def _name(value):
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("short_name") or value.get("title") or "").strip()
+    return str(value or "").strip()
 
-    cache_key = (
-        f"odds_v2:{endpoint}:"
-        f"{sorted(params.items())}"
-    )
 
-    cached = await get_api_cache(cache_key)
-    if cached is not None:
-        return cached
+def _kickoff(event):
+    return (event.get("start_time") or event.get("kickoff") or
+            event.get("date") or event.get("match_date") or
+            event.get("scheduled_at") or "")
 
-    if not API_FOOTBALL_KEY:
-        logger.error("API_FOOTBALL_KEY не задан")
-        return None
 
+def _future(raw):
     try:
-        async with session.get(
-            f"{API_BASE}/{endpoint.lstrip('/')}",
-            params=params,
-        ) as response:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc) > datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return False
 
-            remaining = response.headers.get(
-                "x-ratelimit-requests-remaining"
-            )
 
-            if remaining is not None:
-                logger.info(
-                    "API-Football: осталось запросов %s",
-                    remaining,
-                )
-
+async def _get(session, path, params=None):
+    key = (path, tuple(sorted((params or {}).items())))
+    cached = _CACHE.get(key)
+    if cached and time.monotonic() - cached[0] < CACHE_SECONDS:
+        return cached[1]
+    try:
+        async with session.get(BASE + path, params=params) as response:
             if response.status != 200:
-                logger.error(
-                    "API-Football HTTP %s: %s",
-                    response.status,
-                    (await response.text())[:200],
-                )
+                logger.error("BSD %s HTTP %s: %s", path, response.status,
+                             (await response.text())[:250])
                 return None
-
-            data = await response.json()
-
-            if not isinstance(data, dict):
-                logger.error("Неожиданный ответ API")
-                return None
-
-            if data.get("errors"):
-                logger.error(
-                    "API-Football errors: %s",
-                    data["errors"],
-                )
-                return None
-
-            await set_api_cache(
-                cache_key,
-                data,
-                CACHE_TTL,
-            )
-
+            data = await response.json(content_type=None)
+            _CACHE[key] = (time.monotonic(), data)
             return data
-
-    except (
-        aiohttp.ClientError,
-        asyncio.TimeoutError,
-        ValueError,
-    ) as exc:
-        logger.error("Ошибка API-Football: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        logger.error("BSD request %s failed: %s", path, exc)
         return None
-
-
-def parse_over_line(value):
-    """
-    Распознаёт варианты:
-    Over 1.5
-    Over 2.5
-    Over 3.5
-    """
-
-    text = str(value or "").strip()
-
-    match = re.fullmatch(
-        r"Over\s*([0-9]+(?:[.,][0-9]+)?)",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    if not match:
-        return None
-
-    try:
-        line = float(
-            match.group(1).replace(",", ".")
-        )
-    except ValueError:
-        return None
-
-    if line not in SUPPORTED_LINES:
-        return None
-
-    return line
-
-
-def parse_odds(raw_data, fixture_map):
-    """Преобразует коэффициенты в формат sender.py."""
-
-    best_odds = {}
-
-    for item in raw_data:
-        fixture_info = item.get("fixture") or {}
-        fixture_id = fixture_info.get("id")
-
-        if fixture_id is None:
-            continue
-
-        try:
-            fixture_id = int(fixture_id)
-        except (TypeError, ValueError):
-            continue
-
-        match = fixture_map.get(fixture_id)
-
-        if not match:
-            continue
-
-        for bookmaker in item.get("bookmakers") or []:
-            for bet in bookmaker.get("bets") or []:
-
-                try:
-                    bet_id = int(bet.get("id"))
-                except (TypeError, ValueError):
-                    continue
-
-                if bet_id != TOTALS_BET_ID:
-                    continue
-
-                for outcome in bet.get("values") or []:
-
-                    line = parse_over_line(
-                        outcome.get("value")
-                    )
-
-                    if line is None:
-                        continue
-
-                    try:
-                        price = float(
-                            outcome.get("odd")
-                        )
-                    except (TypeError, ValueError):
-                        continue
-
-                    if price <= 1:
-                        continue
-
-                    key = (fixture_id, line)
-
-                    if (
-                        key not in best_odds
-                        or price > best_odds[key]
-                    ):
-                        best_odds[key] = price
-
-    matches = []
-
-    for (fixture_id, line), price in best_odds.items():
-        match = fixture_map[fixture_id]
-
-        matches.append({
-            "event_id": f"api_football_{fixture_id}",
-            "fixture_id": fixture_id,
-            "home_id": match["home_id"],
-            "away_id": match["away_id"],
-            "league_id": match["league_id"],
-            "home": match["home"],
-            "away": match["away"],
-            "league": match["league"],
-            "commence_time": match["commence_time"],
-            "line": line,
-            "odds": price,
-
-            # Временные значения для текущего sender.py.
-            # Позже заменим реальной моделью команд.
-            "home_strength": 1.5,
-            "away_strength": 1.4,
-        })
-
-    return matches
 
 
 async def get_odds():
-    """Получает прематчевые тоталы API-Football."""
-
-    if not API_FOOTBALL_KEY:
-        logger.error("Отсутствует API_FOOTBALL_KEY")
+    """Return sender-compatible match/line rows for upcoming BSD fixtures."""
+    token = os.getenv("BSD_API_KEY", "").strip()
+    if not token:
+        logger.error("BSD_API_KEY is missing in .env")
         return []
 
-    now = datetime.now(timezone.utc)
+    today = datetime.now(timezone.utc).date()
+    params = {"date_from": today.isoformat(),
+              "date_to": (today + timedelta(days=1)).isoformat(),
+              "limit": 200, "offset": 0}
+    timeout = aiohttp.ClientTimeout(total=25)
+    headers = {"Authorization": f"Token {token}"}
 
-    all_odds = []
-    fixture_map = {}
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        events = []
+        while len(events) < MAX_EVENTS:
+            page = await _get(session, "/events/", params)
+            if not isinstance(page, dict) or not isinstance(page.get("results"), list):
+                logger.error("BSD unexpected events response shape")
+                return []
+            batch = page["results"]
+            events.extend(batch)
+            if not page.get("next") or not batch:
+                break
+            params["offset"] += len(batch)
 
-    headers = {
-        "x-apisports-key": API_FOOTBALL_KEY,
-    }
-
-    async with aiohttp.ClientSession(
-        headers=headers,
-        timeout=TIMEOUT,
-    ) as session:
-
-        for day_offset in range(DAYS_AHEAD):
-
-            date = (
-                now + timedelta(days=day_offset)
-            ).date().isoformat()
-
-            # Получаем матчи на выбранную дату.
-            fixtures_data = await api_get(
-                session,
-                "fixtures",
-                {
-                    "date": date,
-                    "timezone": "UTC",
-                },
-            )
-
-            if not fixtures_data:
-                logger.warning(
-                    "Не удалось получить матчи на %s",
-                    date,
-                )
+        eligible = []
+        for event in events[:MAX_EVENTS]:
+            if not isinstance(event, dict):
                 continue
+            event_id = event.get("id")
+            kickoff = _kickoff(event)
+            home = _name(event.get("home_team") or event.get("home_team_name") or event.get("home"))
+            away = _name(event.get("away_team") or event.get("away_team_name") or event.get("away"))
+            if event_id is None or not home or not away or not _future(kickoff):
+                continue
+            eligible.append((event, event_id, home, away, kickoff))
 
-            for item in fixtures_data.get("response", []):
-                fixture = item.get("fixture") or {}
-                teams = item.get("teams") or {}
-                league = item.get("league") or {}
+        sem = asyncio.Semaphore(MAX_PARALLEL)
 
-                fixture_id = fixture.get("id")
-                commence_time = fixture.get("date")
-
-                if fixture_id is None or not commence_time:
-                    continue
-
+        async def evaluate(row):
+            event, event_id, home, away, kickoff = row
+            async with sem:
+                payload = await _get(session, f"/events/{event_id}/odds/")
+            if not isinstance(payload, dict):
+                return []
+            prices = payload.get("odds") or {}
+            if not isinstance(prices, dict):
+                return []
+            league = _name(event.get("league") or event.get("league_name") or event.get("competition")) or "Football"
+            result = []
+            for line, field in LINES.items():
                 try:
-                    fixture_id = int(fixture_id)
-
-                    kickoff = datetime.fromisoformat(
-                        commence_time.replace(
-                            "Z", "+00:00"
-                        )
-                    )
-
-                    if kickoff.tzinfo is None:
-                        kickoff = kickoff.replace(
-                            tzinfo=timezone.utc
-                        )
-
-                except (ValueError, TypeError):
+                    odd = float(prices.get(field))
+                except (TypeError, ValueError):
                     continue
-
-                # Только будущие матчи.
-                if kickoff <= now:
+                if not math.isfinite(odd) or odd <= 1:
                     continue
+                result.append({
+                    "event_id": str(event_id),
+                    "fixture_id": None,  # BSD IDs must not be used in API-Football /fixtures?id
+                    "home": home, "away": away, "league": league,
+                    "commence_time": kickoff,
+                    "line": line, "odds": odd,
+                    "home_id": (event.get("home_team") or {}).get("id") if isinstance(event.get("home_team"), dict) else event.get("home_team_id"),
+                    "away_id": (event.get("away_team") or {}).get("id") if isinstance(event.get("away_team"), dict) else event.get("away_team_id"),
+                    "league_id": (event.get("league") or {}).get("id") if isinstance(event.get("league"), dict) else event.get("league_id"),
+                })
+            return result
 
-                home = (
-                    teams.get("home") or {}
-                ).get("name")
-
-                away = (
-                    teams.get("away") or {}
-                ).get("name")
-
-                if not home or not away:
-                    continue
-
-                fixture_map[fixture_id] = {   
-                    "home_id": (teams.get("home") or {}).get("id"),
-                    "away_id": (teams.get("away") or {}).get("id"),
-                    "league_id": league.get("id"),
-                    "home": home,
-                    "away": away,
-                    "league": league.get(
-                        "name", "Футбол"
-                    ),
-                    "commence_time": commence_time,
-                }
-
-            # Коэффициенты: максимум 2 страницы.
-            for page in range(
-                1,
-                MAX_PAGES_PER_DATE + 1,
-            ):
-
-                odds_data = await api_get(
-                    session,
-                    "odds",
-                    {
-                        "date": date,
-                        "bet": TOTALS_BET_ID,
-                        "page": page,
-                    },
-                )
-
-                if not odds_data:
-                    break
-
-                all_odds.extend(
-                    odds_data.get("response", [])
-                )
-
-                paging = odds_data.get("paging") or {}
-
-                try:
-                    total_pages = int(
-                        paging.get("total", 1)
-                    )
-                except (ValueError, TypeError):
-                    total_pages = 1
-
-                if page >= total_pages:
-                    break
-
-    matches = parse_odds(
-        all_odds,
-        fixture_map,
-    )
-
-    logger.info(
-        "API-Football: найдено %s вариантов тоталов",
-        len(matches),
-    )
-
-    return matches
-
-
-async def get_soccer_odds():
-    """Совместимость со старым названием функции."""
-    return await get_odds()
+        groups = await asyncio.gather(*(evaluate(row) for row in eligible))
+        result = [item for group in groups for item in group]
+        logger.info("BSD: %d upcoming matches, %d total-goals prices", len(eligible), len(result))
+        return result
