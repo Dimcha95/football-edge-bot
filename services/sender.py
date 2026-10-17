@@ -5,6 +5,9 @@ import asyncio
 import math
 from datetime import datetime, timezone
 from html import escape
+from zoneinfo import ZoneInfo
+
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 
 from config import (
     ADMIN_IDS,
@@ -16,8 +19,10 @@ from database import (
     get_active_users,
     get_user_status,
     save_signal,
+    delete_signal,
     is_signal_sent,
     get_today_signals_count,
+    set_user_active,
 )
 from services.odds import get_odds
 from services.model import (
@@ -39,11 +44,16 @@ _SEND_LOCK = asyncio.Lock()
 # Разрешённые рынки: только тотал больше.
 ALLOWED_OVER_LINES = (1.5, 2.5, 3.5)
 
-# Режимы расчёта: для рабочей рассылки используется experimental.
+# Режимы расчёта: для рабочей рассылки используется historical.
 HISTORICAL_MODE = "historical"
 EXPERIMENTAL_MODE = "experimental"
 EXPERIMENTAL_HOME_GOALS = 1.5
 EXPERIMENTAL_AWAY_GOALS = 1.4
+
+MSK = ZoneInfo("Europe/Moscow")
+
+# Пауза между сообщениями (~20 сообщений/сек, лимит Telegram ~30/сек).
+SEND_DELAY = 0.05
 
 
 def is_future_match(commence_time):
@@ -63,6 +73,40 @@ def is_future_match(commence_time):
 
     except (ValueError, TypeError, OverflowError):
         return False
+
+
+def format_kickoff(value) -> str:
+    """Время начала матча по Москве в удобном виде."""
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(MSK).strftime("%d.%m %H:%M МСК")
+    except (ValueError, TypeError, OverflowError):
+        return str(value)
+
+
+async def safe_send(bot, user_id: int, text: str) -> bool:
+    """Отправка с обработкой блокировки бота и лимитов Telegram."""
+    for _ in range(2):
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="HTML",
+            )
+            return True
+        except TelegramForbiddenError:
+            # Пользователь заблокировал бота — отключаем рассылку.
+            await set_user_active(user_id, False)
+            logger.info("Пользователь %s заблокировал бота, отключён", user_id)
+            return False
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except Exception:
+            logger.exception("Ошибка доставки пользователю %s", user_id)
+            return False
+    return False
 
 
 async def get_eligible_users():
@@ -178,7 +222,7 @@ def format_signal(match, evaluation, test=False):
     away = escape(str(match.get("away", "")))
     league = escape(str(match.get("league", "Футбол")))
     commence_time = escape(
-        str(match.get("commence_time", ""))
+        format_kickoff(match.get("commence_time", ""))
     )
 
     line = evaluation["line"]
@@ -241,13 +285,7 @@ def select_best_over_signals(prepared):
 
         current = best_by_match.get(key)
 
-        if current is None:
-            best_by_match[key] = (match, evaluation)
-            continue
-
-        current_evaluation = current[1]
-
-        if evaluation["edge"] > current_evaluation["edge"]:
+        if current is None or evaluation["edge"] > current[1]["edge"]:
             best_by_match[key] = (match, evaluation)
 
     selected = list(best_by_match.values())
@@ -391,27 +429,16 @@ async def test_signal(bot, admin_id=None):
     # Список уже отсортирован по Edge.
     match, evaluation = evaluated_matches[0]
 
-    try:
-        await bot.send_message(
-            chat_id=admin_id,
-            text=format_signal(
-                match,
-                evaluation,
-                test=True,
-            ),
-            parse_mode="HTML",
-        )
+    ok = await safe_send(
+        bot,
+        admin_id,
+        format_signal(match, evaluation, test=True),
+    )
 
-        logger.info(
-            "Тестовый сигнал отправлен администратору %s",
-            admin_id,
-        )
+    if ok:
+        logger.info("Тестовый сигнал отправлен администратору %s", admin_id)
 
-        return True
-
-    except Exception:
-        logger.exception("Ошибка тестовой отправки")
-        return False
+    return ok
 
 
 async def was_match_signalled(match_name, event_id):
@@ -435,7 +462,8 @@ async def was_match_signalled(match_name, event_id):
 
 
 async def check_and_send(bot):
-    """Рассылка лучших исторических ТБ. Сохраняем сигнал до отправки."""
+    """Рассылка лучших исторических ТБ. Сигнал сохраняется до отправки
+    и откатывается, если не доставлен никому."""
     if not ENABLE_LIVE_SIGNALS:
         logger.info("Рассылка отключена (ENABLE_LIVE_SIGNALS=0)")
         return 0
@@ -455,7 +483,6 @@ async def check_and_send(bot):
             logger.info("Нет пользователей с активным доступом")
             return 0
 
-        # Используем реальные результаты команд, а не фиксированные 2.9 гола.
         evaluated_matches = await load_evaluated_matches(mode=HISTORICAL_MODE)
         new_signals = 0
 
@@ -483,10 +510,8 @@ async def check_and_send(bot):
                 if await was_match_signalled(match_name, event_id):
                     continue
 
-                # В БД фиксируем до отправки, чтобы повторный запуск не
-                # создавал повторных рассылок. При сбое Telegram повторной
-                # доставки автоматически не будет: для неё нужна отдельная
-                # таблица доставок по пользователям.
+                # Фиксируем в БД до отправки, чтобы повторный запуск не
+                # создавал дублей.
                 saved = await save_signal(
                     match_name=match_name,
                     league=match.get("league", "Футбол"),
@@ -508,23 +533,26 @@ async def check_and_send(bot):
             new_signals += 1
             message = format_signal(match, evaluation)
             delivered = 0
+
             for user_id in users:
-                try:
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=message,
-                        parse_mode="HTML",
-                    )
+                if await safe_send(bot, user_id, message):
                     delivered += 1
-                except Exception:
-                    logger.exception("Ошибка доставки пользователю %s", user_id)
+                await asyncio.sleep(SEND_DELAY)
 
             logger.info(
-                "BSD сигнал %s | %s | доставлено %s/%s",
+                "Сигнал %s | %s | доставлено %s/%s",
                 match_name, market_name, delivered, len(users),
             )
+
             if delivered == 0:
-                logger.warning("Сигнал сохранён, но не доставлен: %s", match_name)
+                # Никто не получил сигнал — не учитываем его в статистике.
+                # Если матч ещё не начался, он уйдёт при следующем запуске.
+                logger.warning("Сигнал не доставлен, откатываю: %s", match_name)
+                try:
+                    await delete_signal(str(event_id), market_name)
+                except Exception:
+                    logger.exception("Не удалось откатить сигнал: %s", match_name)
+                new_signals -= 1
 
         logger.info("Сохранено новых сигналов: %s", new_signals)
         return new_signals
