@@ -185,6 +185,7 @@ def evaluate_match(match):
             home_xg,
             away_xg,
             line,
+            prior_total=match.get("league_avg_total"),
         )
 
         edge = calculate_edge(probability, odds)
