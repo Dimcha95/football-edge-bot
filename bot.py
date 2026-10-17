@@ -1,6 +1,6 @@
-
 import asyncio
 import logging
+import os
 from html import escape
 
 from dotenv import load_dotenv
@@ -25,13 +25,16 @@ from database import (
     add_user,
     set_user_active,
     get_stats,
+    get_stats_for_period,
+    get_over_stats,
     get_users_count,
+    get_users_ending_trial,
     set_premium,
     get_user_status,
     get_today_signals_count,
     get_recent_results,
 )
-from services.sender import check_and_send
+from services.sender import check_and_send, test_signal
 from services.results import check_results
 
 
@@ -45,10 +48,18 @@ logger = logging.getLogger(__name__)
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в .env")
 
+PORT = int(os.getenv("PORT", 10000))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+
+PERIODS = {
+    "1": ("Сегодня", 1),
+    "7": ("7 дней", 7),
+    "30": ("30 дней", 30),
+    "all": ("Всё время", None),
+}
 
 
 def is_admin(user_id: int) -> bool:
@@ -58,48 +69,43 @@ def is_admin(user_id: int) -> bool:
 def main_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Включить сигналы", callback_data="on")],
+            [InlineKeyboardButton(text="❌ Выключить", callback_data="off")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+            [InlineKeyboardButton(text="📅 Статистика по периодам", callback_data="periods")],
+            [InlineKeyboardButton(text="📈 Статистика по рынкам", callback_data="markets")],
+            [InlineKeyboardButton(text="📋 Сводка за сегодня", callback_data="today")],
+        ]
+    )
+
+
+def periods_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="✅ Включить сигналы",
-                    callback_data="on",
-                )
+                InlineKeyboardButton(text="Сегодня", callback_data="period:1"),
+                InlineKeyboardButton(text="7 дней", callback_data="period:7"),
             ],
             [
-                InlineKeyboardButton(
-                    text="❌ Выключить",
-                    callback_data="off",
-                )
+                InlineKeyboardButton(text="30 дней", callback_data="period:30"),
+                InlineKeyboardButton(text="Всё время", callback_data="period:all"),
             ],
-            [
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data="stats",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📅 Статистика по периодам",
-                    callback_data="periods",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Сводка за сегодня",
-                    callback_data="today",
-                )
-            ],
+            [InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")],
+        ]
+    )
+
+
+def back_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")]
         ]
     )
 
 
 async def set_commands():
     await bot.set_my_commands(
-        [
-            BotCommand(
-                command="start",
-                description="Запуск бота",
-            ),
-        ],
+        [BotCommand(command="start", description="Запуск бота")],
         scope=BotCommandScopeDefault(),
     )
 
@@ -107,35 +113,18 @@ async def set_commands():
         try:
             await bot.set_my_commands(
                 [
-                    BotCommand(
-                        command="start",
-                        description="Запуск",
-                    ),
-                    BotCommand(
-                        command="admin",
-                        description="Админ-панель",
-                    ),
-                    BotCommand(
-                        command="premium",
-                        description="Выдать Premium",
-                    ),
-                    BotCommand(
-                        command="unpremium",
-                        description="Снять Premium",
-                    ),
-                    BotCommand(
-                        command="today",
-                        description="Сигналы сегодня",
-                    ),
+                    BotCommand(command="start", description="Запуск"),
+                    BotCommand(command="admin", description="Админ-панель"),
+                    BotCommand(command="premium", description="Выдать Premium"),
+                    BotCommand(command="unpremium", description="Снять Premium"),
+                    BotCommand(command="today", description="Сигналы сегодня"),
+                    BotCommand(command="testsignal", description="Тестовый сигнал"),
                 ],
-                scope=BotCommandScopeChat(
-                    chat_id=admin_id
-                ),
+                scope=BotCommandScopeChat(chat_id=admin_id),
             )
         except Exception:
             logger.exception(
-                "Не удалось установить команды администратора %s",
-                admin_id,
+                "Не удалось установить команды администратора %s", admin_id
             )
 
 
@@ -151,6 +140,26 @@ async def has_access(user_id: int) -> bool:
     return False
 
 
+def start_text(status_text: str) -> str:
+    return (
+        "⚽️ <b>Football Edge Bot</b>\n\n"
+        "Бот анализирует футбольные коэффициенты "
+        "и ищет потенциальные value-ставки.\n\n"
+        f"Статус: <b>{status_text}</b>\n\n"
+        "Используй кнопки ниже для управления."
+    )
+
+
+async def status_text_for(user_id: int) -> str:
+    status, days_left = await get_user_status(user_id)
+
+    if status == "premium":
+        return "💎 Premium"
+    if status == "trial" and days_left is not None and days_left > 0:
+        return f"🎁 Пробный период: {days_left} дн."
+    return "⛔ Пробный период закончился"
+
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if not message.from_user:
@@ -158,34 +167,28 @@ async def cmd_start(message: types.Message):
 
     user_id = message.from_user.id
 
-    await add_user(
-        user_id,
-        message.from_user.username,
-    )
+    await add_user(user_id, message.from_user.username)
 
-    status, days_left = await get_user_status(user_id)
+    status_text = await status_text_for(user_id)
 
-    if status == "premium":
-        status_text = "💎 Premium"
-    elif status == "trial" and days_left is not None and days_left > 0:
-        status_text = f"🎁 Пробный период: {days_left} дн."
-    else:
-        status_text = "⛔ Пробный период закончился"
-
-    if await has_access(user_id):
-        await set_user_active(user_id, True)
-    else:
-        await set_user_active(user_id, False)
+    await set_user_active(user_id, await has_access(user_id))
 
     await message.answer(
-        "⚽️ <b>Football Edge Bot</b>\n\n"
-        "Бот анализирует футбольные коэффициенты "
-        "и ищет потенциальные value-ставки.\n\n"
-        f"Статус: <b>{status_text}</b>\n\n"
-        "Используй кнопки ниже для управления.",
+        start_text(status_text),
         reply_markup=main_keyboard(),
         parse_mode="HTML",
     )
+
+
+@dp.callback_query(F.data == "menu")
+async def show_menu(callback: types.CallbackQuery):
+    if callback.message and callback.from_user:
+        await callback.message.answer(
+            start_text(await status_text_for(callback.from_user.id)),
+            reply_markup=main_keyboard(),
+            parse_mode="HTML",
+        )
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "on")
@@ -197,7 +200,6 @@ async def turn_on(callback: types.CallbackQuery):
 
     if not await has_access(user_id):
         await set_user_active(user_id, False)
-
         await callback.answer(
             "Пробный период закончился. Требуется Premium.",
             show_alert=True,
@@ -205,13 +207,11 @@ async def turn_on(callback: types.CallbackQuery):
         return
 
     await set_user_active(user_id, True)
-
     await callback.answer("Сигналы включены")
 
     if callback.message:
         await callback.message.answer(
-            "✅ Сигналы включены.\n"
-            "Бот будет присылать подходящие сигналы."
+            "✅ Сигналы включены.\nБот будет присылать подходящие сигналы."
         )
 
 
@@ -220,17 +220,11 @@ async def turn_off(callback: types.CallbackQuery):
     if not callback.from_user:
         return
 
-    await set_user_active(
-        callback.from_user.id,
-        False,
-    )
-
+    await set_user_active(callback.from_user.id, False)
     await callback.answer("Сигналы выключены")
 
     if callback.message:
-        await callback.message.answer(
-            "❌ Сигналы выключены."
-        )
+        await callback.message.answer("❌ Сигналы выключены.")
 
 
 @dp.callback_query(F.data == "stats")
@@ -254,11 +248,7 @@ async def show_stats(callback: types.CallbackQuery):
 
     if results:
         for match_name, market, odds, edge, result in results:
-            icon = {
-                "win": "✅",
-                "loss": "❌",
-                "push": "↩️",
-            }.get(result, "⏳")
+            icon = {"win": "✅", "loss": "❌", "push": "↩️"}.get(result, "⏳")
 
             safe_match_name = escape(str(match_name))
             safe_market = escape(str(market))
@@ -273,8 +263,7 @@ async def show_stats(callback: types.CallbackQuery):
 
     if callback.message:
         await callback.message.answer(
-            text,
-            parse_mode="HTML",
+            text, parse_mode="HTML", reply_markup=back_keyboard()
         )
 
     await callback.answer()
@@ -286,7 +275,7 @@ async def show_today(callback: types.CallbackQuery):
 
     if callback.message:
         await callback.message.answer(
-            f"📋 Сигналов сегодня: {count}"
+            f"📋 Сигналов сегодня: {count}", reply_markup=back_keyboard()
         )
 
     await callback.answer()
@@ -296,9 +285,62 @@ async def show_today(callback: types.CallbackQuery):
 async def show_periods(callback: types.CallbackQuery):
     if callback.message:
         await callback.message.answer(
-            "📅 Статистика по периодам пока в разработке."
+            "📅 Выбери период:", reply_markup=periods_keyboard()
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("period:"))
+async def show_period_stats(callback: types.CallbackQuery):
+    key = (callback.data or "").split(":", 1)[-1]
+    if key not in PERIODS:
+        await callback.answer()
+        return
+
+    title, days = PERIODS[key]
+    s = await get_stats_for_period(days)
+
+    settled = s["wins"] + s["losses"]
+    winrate = s["wins"] / settled * 100 if settled else 0.0
+    roi = s["profit"] / s["roi_bets"] * 100 if s["roi_bets"] else 0.0
+
+    text = (
+        f"📅 <b>Статистика: {escape(title)}</b>\n\n"
+        f"Всего сигналов: {s['total']}\n"
+        f"✅ Побед: {s['wins']}\n"
+        f"❌ Поражений: {s['losses']}\n"
+        f"↩️ Возвратов: {s['pushes']}\n"
+        f"⏳ Ожидают: {s['pending']}\n\n"
+        f"Проходимость: <b>{winrate:.1f}%</b>\n"
+        f"Прибыль (ставка 1 ед.): <b>{s['profit']:+.2f} ед.</b>\n"
+        f"ROI: <b>{roi:+.1f}%</b>"
+    )
+
+    if callback.message:
+        await callback.message.answer(
+            text, parse_mode="HTML", reply_markup=periods_keyboard()
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "markets")
+async def show_markets(callback: types.CallbackQuery):
+    stats = await get_over_stats()
+
+    text = "📈 <b>Статистика по рынкам</b>\n"
+    for line, s in stats.items():
+        text += (
+            f"\n<b>ТБ {line}</b>\n"
+            f"Сигналов: {s['total']} "
+            f"(✅ {s['wins']} / ❌ {s['losses']} / ↩️ {s['pushes']} / ⏳ {s['pending']})\n"
+            f"Проходимость: {s['winrate']:.1f}%\n"
+            f"Прибыль: {s['profit']:+.2f} ед. | ROI: {s['roi']:+.1f}%\n"
         )
 
+    if callback.message:
+        await callback.message.answer(
+            text, parse_mode="HTML", reply_markup=back_keyboard()
+        )
     await callback.answer()
 
 
@@ -332,17 +374,22 @@ async def give_premium(message: types.Message):
     try:
         user_id = int(message.text.split()[1])
     except (IndexError, ValueError, AttributeError):
+        await message.answer("Использование: /premium 123456789")
+        return
+
+    ok = await set_premium(user_id, True)
+    if not ok:
         await message.answer(
-            "Использование: /premium 123456789"
+            "Пользователь не найден. Пусть сначала нажмёт /start."
         )
         return
 
-    await set_premium(user_id, True)
+    await message.answer(f"✅ Premium выдан пользователю {user_id}.")
 
-    await message.answer(
-        f"✅ Premium выдан пользователю {user_id}.\n"
-        "Пользователь должен быть зарегистрирован через /start."
-    )
+    try:
+        await bot.send_message(user_id, "💎 Вам выдан Premium. Спасибо!")
+    except Exception:
+        logger.warning("Не удалось уведомить пользователя %s", user_id)
 
 
 @dp.message(Command("unpremium"))
@@ -353,16 +400,15 @@ async def remove_premium(message: types.Message):
     try:
         user_id = int(message.text.split()[1])
     except (IndexError, ValueError, AttributeError):
-        await message.answer(
-            "Использование: /unpremium 123456789"
-        )
+        await message.answer("Использование: /unpremium 123456789")
         return
 
-    await set_premium(user_id, False)
+    ok = await set_premium(user_id, False)
+    if not ok:
+        await message.answer("Пользователь не найден в базе.")
+        return
 
-    await message.answer(
-        f"Premium снят с пользователя {user_id}."
-    )
+    await message.answer(f"Premium снят с пользователя {user_id}.")
 
 
 @dp.message(Command("today"))
@@ -371,9 +417,19 @@ async def cmd_today(message: types.Message):
         return
 
     count = await get_today_signals_count()
+    await message.answer(f"📋 Сигналов сегодня: {count}")
 
+
+@dp.message(Command("testsignal"))
+async def cmd_testsignal(message: types.Message):
+    if not message.from_user or not is_admin(message.from_user.id):
+        return
+
+    ok = await test_signal(bot, message.from_user.id)
     await message.answer(
-        f"📋 Сигналов сегодня: {count}"
+        "🧪 Тестовый сигнал отправлен."
+        if ok
+        else "Подходящих сигналов сейчас нет (см. логи)."
     )
 
 
@@ -381,25 +437,37 @@ async def scheduled_check_and_send():
     try:
         await check_and_send(bot)
     except Exception:
-        logger.exception(
-            "Ошибка при проверке коэффициентов"
-        )
+        logger.exception("Ошибка при проверке коэффициентов")
 
 
 async def scheduled_check_results():
     try:
         await check_results(bot)
     except Exception:
-        logger.exception(
-            "Ошибка при обновлении результатов"
-        )
+        logger.exception("Ошибка при обновлении результатов")
+
+
+async def notify_trial_ending():
+    try:
+        user_ids = await get_users_ending_trial()
+    except Exception:
+        logger.exception("Ошибка выборки пользователей с оканчивающимся триалом")
+        return
+
+    for user_id in user_ids:
+        try:
+            await bot.send_message(
+                user_id,
+                "⏰ Пробный период заканчивается завтра. "
+                "Чтобы продолжить получать сигналы, нужен Premium.",
+            )
+        except Exception:
+            logger.warning("Не удалось отправить напоминание %s", user_id)
+        await asyncio.sleep(0.05)
 
 
 async def health_check(request):
-    return web.Response(
-        text="OK",
-        content_type="text/plain",
-    )
+    return web.Response(text="OK", content_type="text/plain")
 
 
 async def start_web_server():
@@ -412,19 +480,13 @@ async def start_web_server():
     await runner.setup()
 
     try:
-        site = web.TCPSite(
-            runner,
-            "0.0.0.0",
-            10000,
-        )
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
         await site.start()
     except Exception:
         await runner.cleanup()
         raise
 
-    logger.info(
-        "Healthcheck server запущен на порту 10000"
-    )
+    logger.info("Healthcheck server запущен на порту %s", PORT)
 
     return runner
 
@@ -455,6 +517,19 @@ async def on_startup():
             minute=30,
             timezone="Europe/Moscow",
             id="scheduled_check_results",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Напоминание об окончании пробного периода (раз в сутки).
+        scheduler.add_job(
+            notify_trial_ending,
+            "cron",
+            hour=12,
+            minute=0,
+            timezone="Europe/Moscow",
+            id="notify_trial_ending",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
