@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from config import (
     ADMIN_IDS,
     MIN_EDGE,
+    MAX_EDGE,
     MIN_PROBABILITY,
     MAX_SIGNALS_PER_DAY,
 )
@@ -202,10 +203,12 @@ def evaluate_match(match):
 
     # Safety heuristic, not a calibrated model: reject extreme disagreement.
     market_implied = 1.0 / odds
+    # Слишком большое расхождение с рынком или слишком большой Edge —
+    # почти всегда ошибка модели, а не реальная ценность.
     passes_filters = (
-        probability <= market_implied + 0.20
+        probability <= market_implied + 0.10
         and probability >= MIN_PROBABILITY
-        and edge >= MIN_EDGE
+        and MIN_EDGE <= edge <= MAX_EDGE
     )
 
     return {
@@ -570,11 +573,21 @@ async def preview_signals(mode=HISTORICAL_MODE, limit=10):
     selected = await load_evaluated_matches(mode=mode)
     print(f"Подходящих матчей: {len(selected)}")
     for match, evaluation in selected[:limit]:
+        xg = ""
+        try:
+            xg = (
+                f" | xG {float(match['home_expected_goals']):.2f}+"
+                f"{float(match['away_expected_goals']):.2f}, "
+                f"лига {float(match['league_avg_total']):.2f}"
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
         print(
             f"{match.get('home', '?')} — {match.get('away', '?')} | "
             f"ТБ {evaluation['line']:g} @ {evaluation['odds']:.2f} | "
             f"p={evaluation['probability']:.1%} | "
             f"условный edge={evaluation['edge']:+.1%}"
+            f"{xg}"
         )
     print("Сообщения не отправлялись. Сигналы в БД не записывались.")
 
