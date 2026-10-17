@@ -43,6 +43,12 @@ async def init_db():
             )
         """)
 
+        # Срок действия Premium (NULL = бессрочно).
+        cursor = await db.execute("PRAGMA table_info(users)")
+        user_columns = {row[1] for row in await cursor.fetchall()}
+        if "premium_until" not in user_columns:
+            await db.execute("ALTER TABLE users ADD COLUMN premium_until TEXT")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,12 +164,39 @@ async def set_user_active(user_id: int, active: bool):
         await db.commit()
 
 
-async def set_premium(user_id: int, is_premium: bool) -> bool:
-    """Возвращает True, если пользователь найден в базе."""
+async def set_premium(user_id: int, is_premium: bool, days: int = None) -> bool:
+    """Выдаёт или снимает Premium. Возвращает True, если пользователь найден.
+
+    days=None — бессрочно. Если Premium уже действует, срок продлевается
+    от текущей даты окончания.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
+        until = None
+
+        if is_premium and days:
+            cursor = await db.execute(
+                "SELECT is_premium, premium_until FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return False
+
+            base = _utcnow()
+            current_premium, current_until = row
+            if current_premium and current_until:
+                try:
+                    current = datetime.fromisoformat(current_until)
+                    if current > base:
+                        base = current
+                except ValueError:
+                    pass
+
+            until = (base + timedelta(days=days)).isoformat()
+
         cursor = await db.execute(
-            "UPDATE users SET is_premium = ? WHERE user_id = ?",
-            (int(is_premium), user_id),
+            "UPDATE users SET is_premium = ?, premium_until = ? WHERE user_id = ?",
+            (int(is_premium), until, user_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -171,13 +204,19 @@ async def set_premium(user_id: int, is_premium: bool) -> bool:
 
 async def get_active_users():
     """Только те, у кого сигналы включены И есть доступ (premium или живой триал)."""
-    trial_cutoff = (_utcnow() - timedelta(days=TRIAL_DAYS)).isoformat()
+    now = _utcnow()
+    trial_cutoff = (now - timedelta(days=TRIAL_DAYS)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT user_id FROM users
             WHERE is_active = 1
-              AND (is_premium = 1 OR joined_at IS NULL OR joined_at > ?)
-        """, (trial_cutoff,))
+              AND (
+                    (is_premium = 1
+                     AND (premium_until IS NULL OR premium_until > ?))
+                    OR joined_at IS NULL
+                    OR joined_at > ?
+                  )
+        """, (now.isoformat(), trial_cutoff))
         return [row[0] for row in await cursor.fetchall()]
 
 
@@ -394,7 +433,7 @@ async def get_users_count():
 async def get_user_status(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
-            SELECT is_premium, joined_at
+            SELECT is_premium, joined_at, premium_until
             FROM users
             WHERE user_id = ?
         """, (user_id,))
@@ -403,10 +442,17 @@ async def get_user_status(user_id: int):
     if not row:
         return None, None
 
-    is_premium, joined_at = row
+    is_premium, joined_at, premium_until = row
 
     if is_premium:
-        return "premium", None
+        if not premium_until:
+            return "premium", None
+        try:
+            if datetime.fromisoformat(premium_until) > _utcnow():
+                return "premium", None
+        except ValueError:
+            return "premium", None
+        # Срок Premium истёк — дальше проверяем как обычного пользователя.
 
     if not joined_at:
         return "trial", TRIAL_DAYS
@@ -450,6 +496,65 @@ async def get_users_ending_trial():
               AND joined_at <= ?
         """, (older_bound, newer_bound))
         return [row[0] for row in await cursor.fetchall()]
+
+
+async def get_premium_until(user_id: int):
+    """Дата окончания Premium по Москве ('дд.мм.гггг') или None, если бессрочно."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT premium_until FROM users WHERE user_id = ? AND is_premium = 1",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+
+    if not row or not row[0]:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(row[0]).replace(tzinfo=timezone.utc)
+        return dt.astimezone(MSK).strftime("%d.%m.%Y")
+    except ValueError:
+        return None
+
+
+async def get_users_premium_ending():
+    """Пользователи, у которых Premium закончится в ближайшие 24 часа."""
+    now = _utcnow()
+    soon = now + timedelta(days=1)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT user_id FROM users
+            WHERE is_premium = 1
+              AND premium_until IS NOT NULL
+              AND premium_until > ?
+              AND premium_until <= ?
+        """, (now.isoformat(), soon.isoformat()))
+        return [row[0] for row in await cursor.fetchall()]
+
+
+async def expire_premiums():
+    """Снимает просроченный Premium. Возвращает ID затронутых пользователей."""
+    now = _utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT user_id FROM users
+            WHERE is_premium = 1
+              AND premium_until IS NOT NULL
+              AND premium_until <= ?
+        """, (now,))
+        user_ids = [row[0] for row in await cursor.fetchall()]
+
+        if user_ids:
+            await db.execute("""
+                UPDATE users
+                SET is_premium = 0, premium_until = NULL
+                WHERE is_premium = 1
+                  AND premium_until IS NOT NULL
+                  AND premium_until <= ?
+            """, (now,))
+            await db.commit()
+
+    return user_ids
 
 
 async def get_api_cache(cache_key: str):
