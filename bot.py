@@ -475,16 +475,16 @@ async def on_startup():
     if not scheduler.running:
         # Пять проверок коэффициентов ежедневно, по Москве.
         # Ночью новые сигналы не ищем.
-        scheduler.add_job(
-            scheduled_check_and_send,
-            "cron",
-            hour="10,13,16,19,22",
-            minute=0,
-            timezone="Europe/Moscow",
-            id="send_signals",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
+          scheduler.add_job(
+          scheduled_check_and_send,
+          "cron",
+          hour="10-22",
+          minute=0,
+          timezone="Europe/Moscow",
+          id="scheduled_check_and_send",
+          replace_existing=True,
+          max_instances=1,
+          coalesce=True,
         )
 
         # Результаты проверяем четыре раза в сутки.
