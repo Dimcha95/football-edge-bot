@@ -1,256 +1,232 @@
 
+"""BSD match results for Football Edge Bot.
+
+Uses BSD event IDs, never API-Football fixture IDs.
+Only settles Over 1.5 / 2.5 / 3.5 markets.
+"""
+
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import datetime, timezone
 
 import aiohttp
+from dotenv import load_dotenv
 
-from config import API_FOOTBALL_KEY
 from database import (
     get_pending_signals_with_time,
     update_signal_result,
-    get_api_cache,
-    set_api_cache,
 )
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-API_BASE = "https://v3.football.api-sports.io"
-CACHE_TTL = 15 * 60
-FINAL_STATUSES = {"FT", "AET", "PEN"}
+BASE = "https://sports.bzzoiro.com/api/v2"
+MAX_PARALLEL = 5
+
+FINAL_STATUSES = {
+    "finished", "completed", "final", "ft",
+    "full_time", "fulltime", "ended",
+}
+
+UNSETTLED_STATUSES = {
+    "cancelled", "canceled", "postponed",
+    "abandoned", "suspended", "void",
+}
 
 
-async def api_get(
-    endpoint: str,
-    params: dict,
-    ttl: int = CACHE_TTL,
-):
-    """Получает данные API-Football с кешированием."""
+def parse_total_line(market):
+    """Extract an Over total from supported market names."""
+    text = str(market or "").lower().strip()
+    text = text.replace(",", ".")
 
-    if not API_FOOTBALL_KEY:
-        logger.error("API_FOOTBALL_KEY не задан")
+    for prefix in ("тб", "over_", "over ", "over"):
+        if text.startswith(prefix):
+            tail = text[len(prefix):].strip()
+            tail = tail.replace("_", ".")
+
+            try:
+                line = float(tail)
+            except ValueError:
+                return None
+
+            if line in (1.5, 2.5, 3.5):
+                return line
+
+    return None
+
+
+def calculate_result(market, total_goals):
+    """Calculate Over market settlement."""
+    line = parse_total_line(market)
+
+    if line is None:
         return None
 
-    cache_key = f"results:{endpoint}:{sorted(params.items())}"
+    return "win" if total_goals > line else "loss"
 
-    cached = await get_api_cache(cache_key)
-    if cached is not None:
-        return cached
 
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    timeout = aiohttp.ClientTimeout(total=20)
+def parse_datetime(value):
+    if not value:
+        return None
 
     try:
-        async with aiohttp.ClientSession(
-            headers=headers,
-            timeout=timeout,
-        ) as session:
-            async with session.get(
-                f"{API_BASE}/{endpoint.lstrip('/')}",
-                params=params,
-            ) as response:
-                if response.status != 200:
-                    logger.error(
-                        "API-Football HTTP %s: %s",
-                        response.status,
-                        (await response.text())[:200],
-                    )
-                    return None
+        dt = datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
 
-                data = await response.json()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
 
-                if not isinstance(data, dict):
-                    logger.error("Некорректный ответ API-Football")
-                    return None
+        return dt.astimezone(timezone.utc)
 
-                if data.get("errors"):
-                    logger.error(
-                        "Ошибки API-Football: %s",
-                        data["errors"],
-                    )
-                    return None
+    except (ValueError, TypeError, AttributeError):
+        return None
 
-                await set_api_cache(cache_key, data, ttl)
-                return data
+
+def _score(value):
+    if isinstance(value, bool):
+        return None
+
+    try:
+        number = int(value)
+        if number >= 0 and str(value).strip() == str(number):
+            return number
+    except (ValueError, TypeError):
+        pass
+
+    return None
+
+
+def extract_total_goals(payload):
+    """Return total goals only for confirmed finished events."""
+    if not isinstance(payload, dict):
+        return None
+
+    event = payload.get("event", payload)
+
+    if not isinstance(event, dict):
+        return None
+
+    status_value = event.get("status", "")
+
+    if isinstance(status_value, dict):
+        status_value = (
+            status_value.get("name")
+            or status_value.get("short")
+            or status_value.get("code")
+            or ""
+        )
+
+    status = str(status_value).strip().lower()
+
+    if status in UNSETTLED_STATUSES:
+        return None
+
+    if event.get("cancelled") or event.get("postponed"):
+        return None
+
+    finished = event.get("finished")
+
+    if finished is not True and status not in FINAL_STATUSES:
+        return None
+
+    # Only use explicitly available full-time scores.
+    # Do not infer scores from live or penalty-shootout fields.
+    pairs = [
+        (event.get("home_score"), event.get("away_score")),
+        (event.get("home_goals"), event.get("away_goals")),
+    ]
+
+    score_data = event.get("score")
+
+    if isinstance(score_data, dict):
+        full_time = (
+            score_data.get("full_time")
+            or score_data.get("fulltime")
+        )
+
+        if isinstance(full_time, dict):
+            pairs.append((
+                full_time.get("home"),
+                full_time.get("away"),
+            ))
+
+    for home_raw, away_raw in pairs:
+        home = _score(home_raw)
+        away = _score(away_raw)
+
+        if home is not None and away is not None:
+            return home + away
+
+    logger.warning(
+        "BSD finished event has unknown score format: %s",
+        str(event)[:500],
+    )
+    return None
+
+
+async def fetch_event(session, event_id):
+    """Fetch an event by its BSD identifier."""
+    url = f"{BASE}/events/{event_id}/"
+
+    try:
+        async with session.get(url) as response:
+            if response.status != 200:
+                logger.warning(
+                    "BSD event %s HTTP %s: %s",
+                    event_id,
+                    response.status,
+                    (await response.text())[:200],
+                )
+                return None
+
+            data = await response.json(content_type=None)
+
+            if not isinstance(data, dict):
+                logger.warning(
+                    "BSD event %s: unexpected response",
+                    event_id,
+                )
+                return None
+
+            return data
 
     except (
         aiohttp.ClientError,
         asyncio.TimeoutError,
         ValueError,
     ) as exc:
-        logger.error("Ошибка API-Football: %s", exc)
-        return None
-
-
-def normalize_name(name: str) -> str:
-    """Упрощает название команды для сравнения."""
-    return "".join(
-        char.lower()
-        for char in (name or "")
-        if char.isalnum()
-    )
-
-
-def parse_total_line(market: str):
-    """Извлекает линию тотала из ТБ 2.5 или over_2.5."""
-
-    text = (market or "").lower().replace(",", ".")
-
-    for prefix in ("тб", "over_", "over"):
-        if text.startswith(prefix):
-            tail = text[len(prefix):].strip().replace("_", "")
-
-            try:
-                return float(tail)
-            except ValueError:
-                return None
-
-    return None
-
-
-def calculate_result(market: str, total_goals: int):
-    """Определяет исход ставки на тотал больше."""
-
-    line = parse_total_line(market)
-
-    if line is None:
-        return None
-
-    if total_goals > line:
-        return "win"
-
-    if total_goals < line:
-        return "loss"
-
-    return "push"
-
-
-def parse_match_name(match_name: str):
-    """Разделяет название матча на две команды."""
-
-    for separator in (" — ", " – ", " - "):
-        if separator in match_name:
-            home, away = match_name.split(separator, 1)
-            return home.strip(), away.strip()
-
-    return None, None
-
-
-def get_match_date(commence_time):
-    """Получает дату матча в UTC."""
-
-    if not commence_time:
-        return None
-
-    try:
-        start = datetime.fromisoformat(
-            commence_time.replace("Z", "+00:00")
-        )
-
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-
-        return start.astimezone(timezone.utc).date()
-
-    except (ValueError, AttributeError):
-        return None
-
-
-async def find_fixture(
-    home: str,
-    away: str,
-    commence_time: str = None,
-):
-    """Ищет матч в API-Football по командам и дате."""
-
-    match_date = get_match_date(commence_time)
-
-    if match_date is None:
-        logger.warning(
-            "Нет корректной даты матча %s — %s",
-            home,
-            away,
+        logger.error(
+            "BSD event %s request failed: %s",
+            event_id,
+            exc,
         )
         return None
 
-    # Проверяем три даты на случай расхождений
-    # между источниками данных.
-    for offset in (0, -1, 1):
-        date = (
-            match_date + timedelta(days=offset)
-        ).isoformat()
 
-        data = await api_get(
-            "fixtures",
-            {
-                "date": date,
-                "timezone": "UTC",
-            },
-        )
+async def check_results(bot=None):
+    """Check pending signals and update completed bets."""
+    token = os.getenv("BSD_API_KEY", "").strip()
 
-        if not data:
-            continue
-
-        for fixture in data.get("response", []):
-            teams = fixture.get("teams") or {}
-
-            api_home = (
-                teams.get("home") or {}
-            ).get("name", "")
-
-            api_away = (
-                teams.get("away") or {}
-            ).get("name", "")
-
-            if (
-                normalize_name(home) == normalize_name(api_home)
-                and normalize_name(away) == normalize_name(api_away)
-            ):
-                return fixture
-
-    return None
-
-
-def extract_total_goals(fixture: dict):
-    """Извлекает итоговый счёт завершённого матча."""
-
-    fixture_info = fixture.get("fixture") or {}
-    status = (fixture_info.get("status") or {}).get("short")
-
-    if status not in FINAL_STATUSES:
-        return None
-
-    goals = fixture.get("goals") or {}
-    home_goals = goals.get("home")
-    away_goals = goals.get("away")
-
-    if home_goals is None or away_goals is None:
-        return None
-
-    try:
-        return int(home_goals) + int(away_goals)
-    except (TypeError, ValueError):
-        return None
-
-
-async def check_results(bot):
-    """Проверяет незавершённые сигналы и обновляет результаты."""
+    if not token:
+        logger.error("BSD_API_KEY is missing")
+        return 0
 
     signals = await get_pending_signals_with_time()
 
     if not signals:
-        logger.info("Нет сигналов для проверки")
-        return
+        logger.info("No pending signals")
+        return 0
 
     logger.info(
-        "Проверка результатов: %s сигналов",
+        "BSD checking %s pending signals",
         len(signals),
     )
 
-    updated = 0
-    fixtures_cache = {}
-
     now = datetime.now(timezone.utc)
+    eligible = []
 
     for signal in signals:
         try:
@@ -264,80 +240,107 @@ async def check_results(bot):
                 commence_time,
             ) = signal
 
-            match_date = get_match_date(commence_time)
-
-            if match_date is None:
+            if not event_id:
                 logger.warning(
-                    "Сигнал %s: отсутствует дата матча",
+                    "Signal %s has no BSD event_id",
                     signal_id,
                 )
                 continue
 
-            # Не проверяем будущие матчи.
-            if match_date > now.date():
-                continue
+            kickoff = parse_datetime(commence_time)
 
-            home, away = parse_match_name(match_name)
-
-            if not home or not away:
+            if kickoff is None:
                 logger.warning(
-                    "Не удалось определить команды: %s",
-                    match_name,
+                    "Signal %s has invalid kickoff",
+                    signal_id,
                 )
                 continue
 
-            cache_key = (
-                str(fixture_id)
-                if fixture_id is not None
-                else f"{home}|{away}|{commence_time}"
+            if kickoff > now:
+                continue
+
+            eligible.append((
+                signal_id,
+                match_name,
+                market,
+                str(event_id),
+            ))
+
+        except (ValueError, TypeError):
+            logger.exception(
+                "Invalid pending signal row: %s",
+                signal,
             )
 
-            if cache_key in fixtures_cache:
-                fixture = fixtures_cache[cache_key]
+    if not eligible:
+        return 0
 
-            elif fixture_id is not None:
-                data = await api_get(
-                    "fixtures",
-                    {"id": fixture_id},
+    timeout = aiohttp.ClientTimeout(total=25)
+    headers = {"Authorization": f"Token {token}"}
+    semaphore = asyncio.Semaphore(MAX_PARALLEL)
+
+    event_ids = list(dict.fromkeys(
+        row[3] for row in eligible
+    ))
+
+    async with aiohttp.ClientSession(
+        headers=headers,
+        timeout=timeout,
+    ) as session:
+
+        async def load_event(event_id):
+            async with semaphore:
+                payload = await fetch_event(
+                    session, event_id
                 )
+                return event_id, payload
 
-                fixtures = (
-                    data.get("response", [])
-                    if data
-                    else []
-                )
+        fetched = await asyncio.gather(
+            *(load_event(event_id) for event_id in event_ids)
+        )
 
-                fixture = fixtures[0] if fixtures else None
-                fixtures_cache[cache_key] = fixture
+    events = dict(fetched)
+    updated = 0
 
-            else:
-                fixture = await find_fixture(
-                    home,
-                    away,
-                    commence_time,
-                )
-                fixtures_cache[cache_key] = fixture
+    for signal_id, match_name, market, event_id in eligible:
+        try:
+            payload = events.get(event_id)
 
-            if not fixture:
-                logger.info(
-                    "Матч не найден: %s",
-                    match_name,
+            if payload is None:
+                continue
+
+            # Protect against accidentally matching another event.
+            event = payload.get("event", payload)
+
+            if not isinstance(event, dict):
+                continue
+
+            returned_id = event.get("id")
+
+            if (
+                returned_id is not None
+                and str(returned_id) != event_id
+            ):
+                logger.error(
+                    "BSD event ID mismatch: %s != %s",
+                    event_id,
+                    returned_id,
                 )
                 continue
 
-            total_goals = extract_total_goals(fixture)
+            total_goals = extract_total_goals(payload)
 
             if total_goals is None:
                 continue
 
             result = calculate_result(
-                market,
-                total_goals,
+                market, total_goals
             )
 
             if result is None:
                 logger.warning(
-                    "Неизвестный рынок: %s",
+                    "Unknown market for signal %s: %s",
+                    signal_id,
                     market,
                 )
                 continue
@@ -351,7 +354,7 @@ async def check_results(bot):
             updated += 1
 
             logger.info(
-                "Результат обновлён: %s | %s | %s | голов: %s",
+                "BSD result: %s | %s | %s | goals=%s",
                 match_name,
                 market,
                 result,
@@ -360,12 +363,12 @@ async def check_results(bot):
 
         except Exception:
             logger.exception(
-                "Ошибка обработки сигнала: %s",
-                signal,
+                "Failed to update signal %s",
+                signal_id,
             )
 
     logger.info(
-        "Проверка завершена. Обновлено: %s",
+        "BSD results check finished: %s updated",
         updated,
     )
 
