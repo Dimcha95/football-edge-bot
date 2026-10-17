@@ -25,7 +25,6 @@ from database import (
     add_user,
     set_user_active,
     get_stats,
-    get_over_stats,
     get_users_count,
     set_premium,
     get_user_status,
@@ -236,85 +235,48 @@ async def turn_off(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: types.CallbackQuery):
-    """Показывает статистику старых и новых сигналов ТБ вместе."""
-    over_stats = await get_over_stats()
-    results = await get_recent_results(10)
+    stats = await get_stats()
+    results = await get_recent_results(15)
+
+    settled = stats["wins"] + stats["losses"]
 
     text = (
-        "📊 <b>Статистика прогнозов ТБ</b>\n"
-        "<i>Исторические сигналы разных версий модели.</i>\n\n"
-    )
-
-    total_wins = total_losses = total_pending = total_pushes = 0
-    total_profit = 0.0
-
-    for line in ("1.5", "2.5", "3.5"):
-        item = over_stats.get(line, {})
-        wins = int(item.get("wins", 0))
-        losses = int(item.get("losses", 0))
-        pending = int(item.get("pending", 0))
-        pushes = int(item.get("pushes", 0))
-        profit = float(item.get("profit", 0))
-        settled = wins + losses
-
-        total_wins += wins
-        total_losses += losses
-        total_pending += pending
-        total_pushes += pushes
-        total_profit += profit
-
-        text += (
-            f"⚽ <b>ТБ {line}</b>\n"
-            f"✅ {wins}  ❌ {losses}  ⏳ {pending}  ↩️ {pushes}\n"
-            f"Проходимость: {wins / settled * 100:.1f}%\n" if settled else
-            f"⚽ <b>ТБ {line}</b>\n"
-            f"✅ {wins}  ❌ {losses}  ⏳ {pending}  ↩️ {pushes}\n"
-            "Проходимость: —\n"
-        )
-        text += (
-            f"Прибыль: {profit:+.2f} ед. | "
-            f"ROI: {profit / settled * 100:+.2f}%\n\n"
-            if settled else "Прибыль: — | ROI: —\n\n"
-        )
-
-    settled_total = total_wins + total_losses
-    text += (
-        "<b>Итого по трём тоталам</b>\n"
-        f"✅ {total_wins}  ❌ {total_losses}  "
-        f"⏳ {total_pending}  ↩️ {total_pushes}\n"
-        f"Проходимость: {total_wins / settled_total * 100:.1f}%\n"
-        f"Прибыль: {total_profit:+.2f} ед.\n"
-        f"ROI: {total_profit / settled_total * 100:+.2f}%\n\n"
-        if settled_total else
-        "<b>Итого по трём тоталам:</b> завершённых ставок пока нет.\n\n"
-    )
-
-    text += (
-        "<i>Расчёт для ставки 1 ед. на сигнал; "
-        "возвраты не входят в знаменатель ROI. "
-        "Историческая доходность не гарантирует будущую.</i>\n\n"
-        "<b>Последние результаты (все рынки):</b>\n"
+        "📊 <b>Эффективность сигналов</b>\n\n"
+        f"Проходимость: <b>{stats['winrate']:.1f}%</b>\n"
+        f"Рассчитано: {settled}\n"
+        f"Всего сигналов: {stats['total']}\n\n"
+        f"✅ Побед: {stats['wins']}\n"
+        f"❌ Поражений: {stats['losses']}\n"
+        f"↩️ Возвратов: {stats.get('pushes', 0)}\n"
+        f"⏳ Ожидают результата: {stats['pending']}\n\n"
+        "<b>Последние результаты:</b>\n"
     )
 
     if results:
         for match_name, market, odds, edge, result in results:
             icon = {
-                "win": "✅", "loss": "❌", "lose": "❌", "push": "↩️",
+                "win": "✅",
+                "loss": "❌",
+                "push": "↩️",
             }.get(result, "⏳")
-            safe_match_name = escape(str(match_name or ""))
-            safe_market = escape(str(market or ""))
-            odds_text = f"{float(odds):.2f}" if odds is not None else "—"
-            edge_text = f"{float(edge) * 100:+.1f}%" if edge is not None else "—"
+
+            safe_match_name = escape(str(match_name))
+            safe_market = escape(str(market))
+
             text += (
                 f"\n{icon} {safe_match_name}\n"
-                f"{safe_market} @ {odds_text}\n"
-                f"Edge: {edge_text}\n"
+                f"{safe_market} @ {odds:.2f}\n"
+                f"Edge: {edge * 100:+.1f}%\n"
             )
     else:
         text += "\nПока нет завершённых сигналов."
 
     if callback.message:
-        await callback.message.answer(text, parse_mode="HTML")
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+        )
+
     await callback.answer()
 
 
@@ -347,18 +309,17 @@ async def cmd_admin(message: types.Message):
 
     users = await get_users_count()
     stats = await get_stats()
-    over_stats = await get_over_stats()
     today = await get_today_signals_count()
-    over_wins = sum(int(x.get("wins", 0)) for x in over_stats.values())
-    over_losses = sum(int(x.get("losses", 0)) for x in over_stats.values())
 
     await message.answer(
         "🛠 <b>Админ-панель</b>\n\n"
         f"👥 Пользователей: {users}\n"
         f"📋 Сигналов сегодня: {today}\n"
         f"📊 Всего сигналов: {stats['total']}\n"
-        f"⚽ ТБ 1.5/2.5/3.5: {over_wins} побед, {over_losses} поражений\n"
-        "📊 Подробности — кнопка «Статистика»",
+        f"✅ Побед: {stats['wins']}\n"
+        f"❌ Поражений: {stats['losses']}\n"
+        f"⏳ Ожидают: {stats['pending']}\n"
+        f"📈 Проходимость: {stats['winrate']:.1f}%",
         parse_mode="HTML",
     )
 
@@ -473,41 +434,37 @@ async def on_startup():
     await set_commands()
 
     if not scheduler.running:
-        # Пять проверок коэффициентов ежедневно, по Москве.
-        # Ночью новые сигналы не ищем.
-          scheduler.add_job(
-          scheduled_check_and_send,
-          "cron",
-          hour="10-22",
-          minute=0,
-          timezone="Europe/Moscow",
-          id="scheduled_check_and_send",
-          replace_existing=True,
-          max_instances=1,
-          coalesce=True,
+        # Проверка сигналов каждый час с 10:00 до 22:00 МСК.
+        scheduler.add_job(
+            scheduled_check_and_send,
+            "cron",
+            hour="10-22",
+            minute=0,
+            timezone="Europe/Moscow",
+            id="scheduled_check_and_send",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
 
-        # Результаты проверяем четыре раза в сутки.
-        # Внимание: расписание само по себе НЕ гарантирует лимит API.
+        # Результаты: четыре раза в сутки по Москве.
         scheduler.add_job(
             scheduled_check_results,
             "cron",
             hour="3,9,15,21",
             minute=30,
             timezone="Europe/Moscow",
-            id="check_results",
+            id="scheduled_check_results",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
         )
 
-        # Сбор истории отключён: старая модель его не использует.
         scheduler.start()
 
     logger.info(
-        "Football Edge Bot запущен. "
-        "Поиск сигналов: 10, 13, 16, 19, 22 по Москве; "
-        "результаты: 03:30, 09:30, 15:30, 21:30."
+        "Football Edge Bot запущен. Поиск сигналов: каждый час "
+        "с 10:00 до 22:00 МСК; результаты: 03:30, 09:30, 15:30, 21:30 МСК."
     )
 
 
