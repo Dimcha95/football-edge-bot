@@ -30,6 +30,9 @@ from database import (
     get_users_count,
     get_users_ending_trial,
     set_premium,
+    get_premium_until,
+    get_users_premium_ending,
+    expire_premiums,
     get_user_status,
     get_today_signals_count,
     get_recent_results,
@@ -154,7 +157,8 @@ async def status_text_for(user_id: int) -> str:
     status, days_left = await get_user_status(user_id)
 
     if status == "premium":
-        return "💎 Premium"
+        until = await get_premium_until(user_id)
+        return f"💎 Premium до {until}" if until else "💎 Premium"
     if status == "trial" and days_left is not None and days_left > 0:
         return f"🎁 Пробный период: {days_left} дн."
     return "⛔ Пробный период закончился"
@@ -371,23 +375,43 @@ async def give_premium(message: types.Message):
     if not message.from_user or not is_admin(message.from_user.id):
         return
 
+    usage = (
+        "Использование:\n"
+        "/premium 123456789 — бессрочно\n"
+        "/premium 123456789 30 — на 30 дней"
+    )
+
+    parts = (message.text or "").split()
+
     try:
-        user_id = int(message.text.split()[1])
-    except (IndexError, ValueError, AttributeError):
-        await message.answer("Использование: /premium 123456789")
+        user_id = int(parts[1])
+        days = int(parts[2]) if len(parts) > 2 else None
+    except (IndexError, ValueError):
+        await message.answer(usage)
         return
 
-    ok = await set_premium(user_id, True)
+    if days is not None and not 1 <= days <= 3650:
+        await message.answer("Срок должен быть от 1 до 3650 дней.")
+        return
+
+    ok = await set_premium(user_id, True, days)
     if not ok:
         await message.answer(
             "Пользователь не найден. Пусть сначала нажмёт /start."
         )
         return
 
-    await message.answer(f"✅ Premium выдан пользователю {user_id}.")
+    until = await get_premium_until(user_id)
+    term = f"до {until}" if until else "бессрочно"
+
+    await message.answer(f"✅ Premium выдан пользователю {user_id} ({term}).")
 
     try:
-        await bot.send_message(user_id, "💎 Вам выдан Premium. Спасибо!")
+        await bot.send_message(
+            user_id,
+            f"💎 Вам выдан Premium ({term}). Спасибо!\n"
+            "Нажмите /start, чтобы открыть меню.",
+        )
     except Exception:
         logger.warning("Не удалось уведомить пользователя %s", user_id)
 
@@ -466,6 +490,43 @@ async def notify_trial_ending():
         await asyncio.sleep(0.05)
 
 
+async def process_premium_expiry():
+    """Напоминает об окончании Premium и снимает просроченный."""
+    try:
+        ending = await get_users_premium_ending()
+        expired = await expire_premiums()
+    except Exception:
+        logger.exception("Ошибка обработки сроков Premium")
+        return
+
+    for user_id in ending:
+        try:
+            await bot.send_message(
+                user_id,
+                "⏰ Premium заканчивается в ближайшие сутки. "
+                "Чтобы продолжить получать сигналы, продлите подписку.",
+            )
+        except Exception:
+            logger.warning("Не удалось отправить напоминание %s", user_id)
+        await asyncio.sleep(0.05)
+
+    for user_id in expired:
+        try:
+            await bot.send_message(
+                user_id,
+                "💎 Срок Premium закончился. "
+                "Чтобы снова получать сигналы, продлите подписку.",
+            )
+        except Exception:
+            logger.warning("Не удалось уведомить об окончании %s", user_id)
+        await asyncio.sleep(0.05)
+
+    if ending or expired:
+        logger.info(
+            "Premium: напоминаний %s, снято %s", len(ending), len(expired)
+        )
+
+
 async def health_check(request):
     return web.Response(text="OK", content_type="text/plain")
 
@@ -496,11 +557,11 @@ async def on_startup():
     await set_commands()
 
     if not scheduler.running:
-        # Проверка сигналов каждый час с 08:00 до 23:00 МСК.
+        # Проверка сигналов каждый час с 10:00 до 22:00 МСК.
         scheduler.add_job(
             scheduled_check_and_send,
             "cron",
-            hour="10-22",
+            hour="8-23",
             minute=0,
             timezone="Europe/Moscow",
             id="scheduled_check_and_send",
@@ -535,11 +596,24 @@ async def on_startup():
             coalesce=True,
         )
 
+        # Сроки Premium: напоминание и снятие просроченного (раз в сутки).
+        scheduler.add_job(
+            process_premium_expiry,
+            "cron",
+            hour=12,
+            minute=5,
+            timezone="Europe/Moscow",
+            id="process_premium_expiry",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
         scheduler.start()
 
     logger.info(
         "Football Edge Bot запущен. Поиск сигналов: каждый час "
-        "с 10:00 до 22:00 МСК; результаты: 03:30, 09:30, 15:30, 21:30 МСК."
+        "с 08:00 до 23:00 МСК; результаты: 03:30, 09:30, 15:30, 21:30 МСК."
     )
 
 
