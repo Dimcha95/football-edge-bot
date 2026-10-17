@@ -1,11 +1,34 @@
-
 import aiosqlite
 import json
-from datetime import datetime, timedelta
+import math
+import re
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 DB_PATH = "edge_bot.db"
 
 TRIAL_DAYS = 3
+
+MSK = ZoneInfo("Europe/Moscow")
+
+
+def _utcnow() -> datetime:
+    """Naive UTC (как хранится в БД)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _period_start_utc(days):
+    """Начало периода по Москве, переведённое в naive UTC (как хранится created_at).
+
+    days=1 -> сегодня с 00:00 МСК, days=7 -> последние 7 календарных дней,
+    None -> всё время.
+    """
+    if days is None:
+        return None
+    start_msk = (datetime.now(MSK) - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return start_msk.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 async def init_db():
@@ -55,6 +78,11 @@ async def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_event_market
             ON signals(event_id, market)
             WHERE event_id IS NOT NULL
+        """)
+
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_signals_created_at
+            ON signals(created_at)
         """)
 
         await db.execute("""
@@ -112,7 +140,7 @@ async def add_user(user_id: int, username: str = None):
             INSERT OR IGNORE INTO users
                 (user_id, username, joined_at)
             VALUES (?, ?, ?)
-        """, (user_id, username, datetime.utcnow().isoformat()))
+        """, (user_id, username, _utcnow().isoformat()))
         await db.commit()
 
 
@@ -125,20 +153,26 @@ async def set_user_active(user_id: int, active: bool):
         await db.commit()
 
 
-async def set_premium(user_id: int, is_premium: bool):
+async def set_premium(user_id: int, is_premium: bool) -> bool:
+    """Возвращает True, если пользователь найден в базе."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+        cursor = await db.execute(
             "UPDATE users SET is_premium = ? WHERE user_id = ?",
             (int(is_premium), user_id),
         )
         await db.commit()
+        return cursor.rowcount > 0
 
 
 async def get_active_users():
+    """Только те, у кого сигналы включены И есть доступ (premium или живой триал)."""
+    trial_cutoff = (_utcnow() - timedelta(days=TRIAL_DAYS)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT user_id FROM users WHERE is_active = 1"
-        )
+        cursor = await db.execute("""
+            SELECT user_id FROM users
+            WHERE is_active = 1
+              AND (is_premium = 1 OR joined_at IS NULL OR joined_at > ?)
+        """, (trial_cutoff,))
         return [row[0] for row in await cursor.fetchall()]
 
 
@@ -168,7 +202,7 @@ async def save_signal(
                 odds,
                 our_prob,
                 edge,
-                datetime.utcnow().isoformat(),
+                _utcnow().isoformat(),
                 str(event_id) if event_id is not None else None,
                 fixture_id,
                 commence_time,
@@ -178,6 +212,16 @@ async def save_signal(
         except aiosqlite.IntegrityError:
             # Например, сигнал с таким event_id и market уже существует.
             return False
+
+
+async def delete_signal(event_id: str, market: str):
+    """Удаляет сигнал (например, если он не был доставлен ни одному пользователю)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM signals WHERE event_id = ? AND market = ? AND result = 'pending'",
+            (str(event_id), market),
+        )
+        await db.commit()
 
 
 async def is_signal_sent(
@@ -232,7 +276,7 @@ async def update_signal_result(
         """, (
             result,
             total_goals,
-            datetime.utcnow().isoformat(),
+            _utcnow().isoformat(),
             signal_id,
         ))
         await db.commit()
@@ -266,6 +310,61 @@ async def get_stats():
         "pushes": pushes,
         "winrate": wins / settled * 100 if settled else 0,
     }
+
+
+async def get_stats_for_period(days):
+    """Статистика за период (days=None — всё время), ставка 1 ед. на сигнал."""
+    start = _period_start_utc(days)
+
+    query = "SELECT result, odds FROM signals"
+    params = ()
+    if start:
+        query += " WHERE created_at >= ?"
+        params = (start,)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+
+    s = {
+        "total": 0,
+        "wins": 0,
+        "losses": 0,
+        "pushes": 0,
+        "pending": 0,
+        "profit": 0.0,
+        "roi_bets": 0,
+    }
+
+    for result, odds in rows:
+        s["total"] += 1
+
+        if result == "win":
+            s["wins"] += 1
+        elif result in ("loss", "lose"):
+            s["losses"] += 1
+        elif result == "push":
+            s["pushes"] += 1
+        else:
+            s["pending"] += 1
+            continue
+
+        if result == "push":
+            s["roi_bets"] += 1  # ставка была, прибыль 0
+            continue
+
+        try:
+            price = float(odds)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(price) or price <= 1:
+            continue
+
+        s["roi_bets"] += 1
+        s["profit"] += (price - 1) if result == "win" else -1
+
+    s["profit"] = round(s["profit"], 2)
+    return s
 
 
 async def get_recent_results(limit: int = 15):
@@ -308,37 +407,43 @@ async def get_user_status(user_id: int):
         return "trial", TRIAL_DAYS
 
     joined = datetime.fromisoformat(joined_at)
-    days_used = max(0, (datetime.utcnow() - joined).days)
+    days_used = max(0, (_utcnow() - joined).days)
     days_left = max(0, TRIAL_DAYS - days_used)
 
     return "trial", days_left
 
 
 async def get_today_signals_count():
+    """Количество сигналов за сегодняшний день по Москве."""
+    start = _period_start_utc(1)
     async with aiosqlite.connect(DB_PATH) as db:
-        today = datetime.utcnow().date().isoformat()
-        cursor = await db.execute("""
-            SELECT COUNT(*)
-            FROM signals
-            WHERE date(created_at) = ?
-        """, (today,))
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM signals WHERE created_at >= ?",
+            (start,),
+        )
         row = await cursor.fetchone()
         return row[0] if row else 0
 
 
 async def get_users_ending_trial():
-    async with aiosqlite.connect(DB_PATH) as db:
-        trial_end_date = (
-            datetime.utcnow() - timedelta(days=TRIAL_DAYS)
-        ).date().isoformat()
+    """Пользователи, у которых триал закончится завтра (осталось 1 день).
 
+    Это те, кто зарегистрировался 2–3 суток назад. При запуске раз в сутки
+    каждый пользователь попадает в выборку ровно один раз.
+    """
+    now = _utcnow()
+    older_bound = (now - timedelta(days=TRIAL_DAYS)).isoformat()
+    newer_bound = (now - timedelta(days=TRIAL_DAYS - 1)).isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT user_id
             FROM users
             WHERE is_premium = 0
               AND is_active = 1
-              AND date(joined_at) = ?
-        """, (trial_end_date,))
+              AND joined_at > ?
+              AND joined_at <= ?
+        """, (older_bound, newer_bound))
         return [row[0] for row in await cursor.fetchall()]
 
 
@@ -356,7 +461,7 @@ async def get_api_cache(cache_key: str):
 
     response, expires_at = row
 
-    if datetime.fromisoformat(expires_at) <= datetime.utcnow():
+    if datetime.fromisoformat(expires_at) <= _utcnow():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "DELETE FROM api_cache WHERE cache_key = ?",
@@ -374,7 +479,7 @@ async def set_api_cache(
     ttl_seconds: int,
 ):
     expires_at = (
-        datetime.utcnow() + timedelta(seconds=ttl_seconds)
+        _utcnow() + timedelta(seconds=ttl_seconds)
     ).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -390,6 +495,7 @@ async def set_api_cache(
             expires_at,
         ))
         await db.commit()
+
 
 async def save_finished_fixture(item):
     """Сохраняет один завершённый матч API-Football. Возвращает True при успехе."""
@@ -437,7 +543,7 @@ async def save_finished_fixture(item):
                 status = excluded.status
         """, (
             fixture_id, league_id, home_id, away_id, match_date,
-            home_goals, away_goals, datetime.utcnow().isoformat(),
+            home_goals, away_goals, _utcnow().isoformat(),
         ))
         await db.commit()
     return True
@@ -466,15 +572,13 @@ async def get_saved_fixture_history():
              match_date, home_goals, away_goals, status) in rows
     ]
 
+
 async def get_over_stats():
     """Статистика только ТБ 1.5, 2.5, 3.5, ставка 1 ед. на сигнал.
 
     ROI вычисляется по завершённым ставкам с корректным коэффициентом.
     Статусы: win, loss, push, pending.
     """
-    import math
-    import re
-
     lines = ("1.5", "2.5", "3.5")
     stats = {
         line: {
@@ -541,6 +645,7 @@ async def get_over_stats():
         )
 
     return stats
+
 
 async def save_bsd_finished_event(event):
     """Store a finished BSD event. Never mix BSD IDs with API-Football IDs.
@@ -609,7 +714,7 @@ async def save_bsd_finished_event(event):
         """, (
             str(event_id), league_id, home_id, away_id,
             date_obj.isoformat(), home_goals, away_goals,
-            datetime.utcnow().isoformat(),
+            _utcnow().isoformat(),
         ))
         await db.commit()
     return True
