@@ -1,4 +1,3 @@
-
 """BSD match results for Football Edge Bot.
 
 Uses BSD event IDs, never API-Football fixture IDs.
@@ -8,7 +7,7 @@ Only settles Over 1.5 / 2.5 / 3.5 markets.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 from dotenv import load_dotenv
@@ -25,14 +24,22 @@ logger = logging.getLogger(__name__)
 BASE = "https://sports.bzzoiro.com/api/v2"
 MAX_PARALLEL = 5
 
+# Через сколько после времени матча отменённый сигнал закрывается как возврат.
+VOID_AFTER = timedelta(days=3)
+
 FINAL_STATUSES = {
     "finished", "completed", "final", "ft",
     "full_time", "fulltime", "ended",
 }
 
-UNSETTLED_STATUSES = {
-    "cancelled", "canceled", "postponed",
-    "abandoned", "suspended", "void",
+# Статусы, при которых матч не будет доигран: ставка возвращается.
+VOID_STATUSES = {
+    "cancelled", "canceled", "abandoned", "void",
+}
+
+# Не закрываем сразу: матч может быть сыгран позже.
+UNSETTLED_STATUSES = VOID_STATUSES | {
+    "postponed", "suspended",
 }
 
 
@@ -99,16 +106,18 @@ def _score(value):
     return None
 
 
-def extract_total_goals(payload):
-    """Return total goals only for confirmed finished events."""
+def get_event(payload):
+    """Return the event dict from a BSD payload."""
     if not isinstance(payload, dict):
         return None
 
     event = payload.get("event", payload)
 
-    if not isinstance(event, dict):
-        return None
+    return event if isinstance(event, dict) else None
 
+
+def get_status(event):
+    """Normalized lowercase status of an event."""
     status_value = event.get("status", "")
 
     if isinstance(status_value, dict):
@@ -119,7 +128,27 @@ def extract_total_goals(payload):
             or ""
         )
 
-    status = str(status_value).strip().lower()
+    return str(status_value).strip().lower()
+
+
+def is_void_event(event):
+    """True for cancelled / abandoned events (stake is returned)."""
+    status = get_status(event)
+
+    if status in VOID_STATUSES:
+        return True
+
+    return bool(event.get("cancelled"))
+
+
+def extract_total_goals(payload):
+    """Return total goals only for confirmed finished events."""
+    event = get_event(payload)
+
+    if event is None:
+        return None
+
+    status = get_status(event)
 
     if status in UNSETTLED_STATUSES:
         return None
@@ -130,6 +159,14 @@ def extract_total_goals(payload):
     finished = event.get("finished")
 
     if finished is not True and status not in FINAL_STATUSES:
+        return None
+
+    # Score may include extra time: don't settle ambiguously.
+    if event.get("extra_time_score") not in (None, ""):
+        logger.warning(
+            "BSD event %s has extra time; settle manually",
+            event.get("id"),
+        )
         return None
 
     # Only use explicitly available full-time scores.
@@ -264,6 +301,7 @@ async def check_results(bot=None):
                 match_name,
                 market,
                 str(event_id),
+                kickoff,
             ))
 
         except (ValueError, TypeError):
@@ -296,13 +334,23 @@ async def check_results(bot=None):
                 return event_id, payload
 
         fetched = await asyncio.gather(
-            *(load_event(event_id) for event_id in event_ids)
+            *(load_event(event_id) for event_id in event_ids),
+            return_exceptions=True,
         )
 
-    events = dict(fetched)
+    events = {}
+
+    for item in fetched:
+        if isinstance(item, Exception):
+            logger.error("BSD fetch failed: %r", item)
+            continue
+
+        event_id, payload = item
+        events[event_id] = payload
+
     updated = 0
 
-    for signal_id, match_name, market, event_id in eligible:
+    for signal_id, match_name, market, event_id, kickoff in eligible:
         try:
             payload = events.get(event_id)
 
@@ -310,9 +358,9 @@ async def check_results(bot=None):
                 continue
 
             # Protect against accidentally matching another event.
-            event = payload.get("event", payload)
+            event = get_event(payload)
 
-            if not isinstance(event, dict):
+            if event is None:
                 continue
 
             returned_id = event.get("id")
@@ -326,6 +374,22 @@ async def check_results(bot=None):
                     event_id,
                     returned_id,
                 )
+                continue
+
+            # Отменённый матч: возврат ставки после VOID_AFTER.
+            if is_void_event(event):
+                if now - kickoff >= VOID_AFTER:
+                    await update_signal_result(
+                        signal_id=signal_id,
+                        result="push",
+                        total_goals=None,
+                    )
+                    updated += 1
+                    logger.info(
+                        "BSD void: %s | %s | push",
+                        match_name,
+                        market,
+                    )
                 continue
 
             total_goals = extract_total_goals(payload)
