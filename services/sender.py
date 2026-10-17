@@ -155,8 +155,11 @@ def evaluate_match(match):
     if not 0 <= probability <= 1:
         return None
 
+    # Safety heuristic, not a calibrated model: reject extreme disagreement.
+    market_implied = 1.0 / odds
     passes_filters = (
-        probability >= MIN_PROBABILITY
+        probability <= market_implied + 0.20
+        and probability >= MIN_PROBABILITY
         and edge >= MIN_EDGE
     )
 
