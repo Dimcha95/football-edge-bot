@@ -56,4 +56,7 @@ MIN_EDGE = _env_float("MIN_EDGE", 0.03, low=0.0, high=1.0)
 # для всех трёх линий поставьте около 0.30.
 MIN_PROBABILITY = _env_float("MIN_PROBABILITY", 0.52, low=0.0, high=1.0)
 
+# Максимальный правдоподобный Edge. Больше — почти наверняка ошибка модели.
+MAX_EDGE = _env_float("MAX_EDGE", 0.15, low=0.0, high=5.0)
+
 MAX_SIGNALS_PER_DAY = _env_int("MAX_SIGNALS_PER_DAY", 15, low=1)
