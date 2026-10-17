@@ -1,4 +1,5 @@
 import logging
+import os
 import argparse
 import asyncio
 import math
@@ -31,8 +32,9 @@ from services.team_stats import (
 
 logger = logging.getLogger(__name__)
 
-# Рабочая рассылка по упрощённой модели; прогнозы не откалиброваны.
-ENABLE_LIVE_SIGNALS = True
+# Рассылка выключена по умолчанию до проверки модели; включение через .env.
+ENABLE_LIVE_SIGNALS = os.getenv("ENABLE_LIVE_SIGNALS", "0").strip().lower() in ("1", "true", "yes", "on")
+_SEND_LOCK = asyncio.Lock()
 
 # Разрешённые рынки: только тотал больше.
 ALLOWED_OVER_LINES = (1.5, 2.5, 3.5)
@@ -194,9 +196,8 @@ def format_signal(match, evaluation, test=False):
         f"🎯 <b>ТБ {line:g}</b> @ {odds:.2f}\n"
         f"📊 Оценка вероятности: {probability * 100:.1f}%\n"
         f"📈 Расчётный Edge: {edge * 100:+.1f}%\n\n"
-        "⚠️ Упрощённая модель Пуассона: для всех матчей "
-        "предполагается 2,9 гола. Вероятности и Edge не "
-        "подтверждены историческим тестированием."
+        "⚠️ Оценка на основе исторических результатов и модели Пуассона. "
+        "Вероятности и Edge не подтверждены бэктестом; это не гарантия выигрыша."
     )
 
 
@@ -431,151 +432,102 @@ async def was_match_signalled(match_name, event_id):
 
 
 async def check_and_send(bot):
-    """Автоматическая рассылка по упрощённой модели."""
-
-    # Аварийный выключатель рассылки.
+    """Рассылка лучших исторических ТБ. Сохраняем сигнал до отправки."""
     if not ENABLE_LIVE_SIGNALS:
-        logger.info(
-            "Автоматическая рассылка отключена: "
-            "модель ещё не проверена"
-        )
-        return
+        logger.info("Рассылка отключена (ENABLE_LIVE_SIGNALS=0)")
+        return 0
 
-    today_count = await get_today_signals_count()
+    if _SEND_LOCK.locked():
+        logger.info("Предыдущая рассылка ещё выполняется")
+        return 0
 
-    if today_count >= MAX_SIGNALS_PER_DAY:
-        logger.info("Достигнут дневной лимит сигналов")
-        return
+    async with _SEND_LOCK:
+        today_count = await get_today_signals_count()
+        if today_count >= MAX_SIGNALS_PER_DAY:
+            logger.info("Дневной лимит сигналов достигнут")
+            return 0
 
-    users = await get_eligible_users()
+        users = await get_eligible_users()
+        if not users:
+            logger.info("Нет пользователей с активным доступом")
+            return 0
 
-    if not users:
-        logger.info(
-            "Нет активных пользователей с доступом"
-        )
-        return
+        # Используем реальные результаты команд, а не фиксированные 2.9 гола.
+        evaluated_matches = await load_evaluated_matches(mode=HISTORICAL_MODE)
+        new_signals = 0
 
-    evaluated_matches = await load_evaluated_matches(mode=EXPERIMENTAL_MODE)
+        for match, evaluation in evaluated_matches:
+            if today_count + new_signals >= MAX_SIGNALS_PER_DAY:
+                break
+            if not evaluation["passes_filters"]:
+                continue
 
-    new_signals = 0
+            event_id = match.get("event_id")
+            home, away = match.get("home"), match.get("away")
+            if not event_id or not home or not away:
+                continue
+            if not is_future_match(match.get("commence_time")):
+                continue
 
-    for match, evaluation in evaluated_matches:
-        if today_count + new_signals >= MAX_SIGNALS_PER_DAY:
-            break
+            line = evaluation["line"]
+            if line not in ALLOWED_OVER_LINES:
+                continue
 
-        # Дополнительная защита.
-        if not evaluation["passes_filters"]:
-            continue
+            match_name = f"{home} — {away}"
+            market_name = f"ТБ {line:g}"
 
-        event_id = match.get("event_id")
-        home = match.get("home")
-        away = match.get("away")
-
-        if event_id is None or not home or not away:
-            continue
-
-        if not is_future_match(match.get("commence_time")):
-            continue
-
-        line = evaluation["line"]
-
-        if line not in ALLOWED_OVER_LINES:
-            continue
-
-        match_name = f"{home} — {away}"
-        market_name = f"ТБ {line:g}"
-
-        try:
-            already_sent = await was_match_signalled(
-                match_name,
-                event_id,
-            )
-
-        except Exception:
-            logger.exception(
-                "Ошибка проверки дубликата: %s",
-                match_name,
-            )
-            continue
-
-        if already_sent:
-            logger.info(
-                "Для матча уже сохранён сигнал: %s",
-                match_name,
-            )
-            continue
-
-        text = format_signal(match, evaluation)
-
-        delivered = 0
-
-        for user_id in users:
             try:
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    parse_mode="HTML",
-                )
-                delivered += 1
+                if await was_match_signalled(match_name, event_id):
+                    continue
 
+                # В БД фиксируем до отправки, чтобы повторный запуск не
+                # создавал повторных рассылок. При сбое Telegram повторной
+                # доставки автоматически не будет: для неё нужна отдельная
+                # таблица доставок по пользователям.
+                saved = await save_signal(
+                    match_name=match_name,
+                    league=match.get("league", "Футбол"),
+                    market=market_name,
+                    odds=evaluation["odds"],
+                    our_prob=evaluation["probability"],
+                    edge=evaluation["edge"],
+                    event_id=str(event_id),
+                    fixture_id=None,
+                    commence_time=match.get("commence_time"),
+                )
+                if not saved:
+                    logger.info("Сигнал уже существует: %s %s", match_name, market_name)
+                    continue
             except Exception:
-                logger.exception(
-                    "Ошибка отправки пользователю %s",
-                    user_id,
-                )
+                logger.exception("Ошибка сохранения: %s", match_name)
+                continue
 
-        if not delivered:
-            logger.warning(
-                "Сигнал никому не доставлен: %s",
-                match_name,
+            new_signals += 1
+            message = format_signal(match, evaluation)
+            delivered = 0
+            for user_id in users:
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode="HTML",
+                    )
+                    delivered += 1
+                except Exception:
+                    logger.exception("Ошибка доставки пользователю %s", user_id)
+
+            logger.info(
+                "BSD сигнал %s | %s | доставлено %s/%s",
+                match_name, market_name, delivered, len(users),
             )
-            continue
+            if delivered == 0:
+                logger.warning("Сигнал сохранён, но не доставлен: %s", match_name)
 
-        fixture_id = match.get("fixture_id")
+        logger.info("Сохранено новых сигналов: %s", new_signals)
+        return new_signals
 
-        try:
-            saved = await save_signal(
-                match_name=match_name,
-                league=match.get("league", "Футбол"),
-                market=market_name,
-                odds=evaluation["odds"],
-                our_prob=evaluation["probability"],
-                edge=evaluation["edge"],
-                event_id=str(event_id),
-                fixture_id=(
-                    int(fixture_id)
-                    if fixture_id is not None
-                    else None
-                ),
-                commence_time=match.get("commence_time"),
-            )
 
-            if saved:
-                new_signals += 1
-                logger.info(
-                    "Сохранён сигнал: %s, %s, Edge %.2f%%",
-                    match_name,
-                    market_name,
-                    evaluation["edge"] * 100,
-                )
-            else:
-                logger.warning(
-                    "Сигнал доставлен, но не сохранён: %s",
-                    match_name,
-                )
-
-        except Exception:
-            logger.exception(
-                "Ошибка сохранения сигнала: %s",
-                match_name,
-            )
-
-    logger.info(
-        "Новых сохранённых сигналов: %s",
-        new_signals,
-    )
-
-async def preview_signals(mode=EXPERIMENTAL_MODE, limit=10):
+async def preview_signals(mode=HISTORICAL_MODE, limit=10):
     """Печатает тестовые варианты. Ничего не отправляет и не сохраняет."""
     if mode not in (HISTORICAL_MODE, EXPERIMENTAL_MODE):
         raise ValueError(f"Неизвестный режим: {mode}")
