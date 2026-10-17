@@ -127,7 +127,8 @@ def estimate_expected_goals(home_id, away_id, league_id, stats, league_totals):
     away_xg = max(MIN_EXPECTED_GOALS, min(MAX_EXPECTED_GOALS, away_xg))
     return {"home_expected_goals": home_xg,
             "away_expected_goals": away_xg,
-            "expected_total": home_xg + away_xg}
+            "expected_total": home_xg + away_xg,
+            "league_avg_total": league_home_avg + league_away_avg}
 
 
 async def fetch_fixture_history():
