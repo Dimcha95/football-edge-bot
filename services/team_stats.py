@@ -25,6 +25,10 @@ MAX_EXPECTED_GOALS = 4.0
 # у команды есть ещё SHRINKAGE_MATCHES «средних» матчей.
 SHRINKAGE_MATCHES = 4
 
+# Среднее по лиге подтягивается к среднему по всем лигам, как будто
+# у лиги есть ещё столько «средних» матчей. Защищает от шума в малых выборках.
+LEAGUE_SHRINKAGE_MATCHES = 30
+
 # История: один раз за запуск грузим INITIAL_LOOKBACK_DAYS, дальше — свежие дни.
 INITIAL_LOOKBACK_DAYS = 90
 RECENT_LOOKBACK_DAYS = 2
@@ -103,8 +107,15 @@ def estimate_expected_goals(home_id, away_id, league_id, stats, league_totals):
         return None
     if home["home_played"] < MIN_TEAM_MATCHES or away["away_played"] < MIN_TEAM_MATCHES:
         return None
-    league_home_avg = safe_divide(league["home_goals"], league["matches"])
-    league_away_avg = safe_divide(league["away_goals"], league["matches"])
+    total_matches = sum(item["matches"] for item in league_totals.values())
+    if total_matches <= 0:
+        return None
+    global_home = sum(item["home_goals"] for item in league_totals.values()) / total_matches
+    global_away = sum(item["away_goals"] for item in league_totals.values()) / total_matches
+
+    k = LEAGUE_SHRINKAGE_MATCHES
+    league_home_avg = (league["home_goals"] + k * global_home) / (league["matches"] + k)
+    league_away_avg = (league["away_goals"] + k * global_away) / (league["matches"] + k)
     if league_home_avg <= 0 or league_away_avg <= 0:
         return None
 
